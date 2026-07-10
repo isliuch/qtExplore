@@ -32,7 +32,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
     def Initialize(self):
         self.SetStartDate(2022, 1, 1)
-      	self.SetEndDate(2026, 7, 9)   # 按需调整；不设EndDate的话QC默认跑到"今天"
+        self.SetEndDate(2026, 7, 9)   # 按需调整；不设EndDate的话QC默认跑到"今天"
         self.SetCash(50000)
         self.SetTimeZone(TimeZones.NewYork)
         self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Margin)
@@ -54,6 +54,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.daily_loss_limit  = 0.02   # 单日最大亏损占权益比例，触发后当日停止开新仓
 
         self.margin_safety_buffer = 0.5  # 只使用 MarginRemaining 的这个比例做新仓位，留缓冲
+
+        # 免费/低等级账户日志配额只有10KB/天，逐笔打印很快就会被截断。
+        # 默认关闭逐笔日志；调试单个具体问题时再临时打开，或用QC自带的
+        # Orders/Charts面板看成交明细，不用日志也能查。
+        self.verbose_logging = False
+        self.trade_count = 0
 
         # 交易时段（美东时间），避开开盘头几分钟噪音，收盘前留出平仓缓冲
         self.session_start_minutes = 9 * 60 + 35
@@ -170,7 +176,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             dd = (self.Portfolio.TotalPortfolioValue - self.daily_start_equity) / self.daily_start_equity
             if dd <= -self.daily_loss_limit:
                 self.trading_halted_today = True
-                self.Log(f"触发单日亏损限制 {dd:.2%}，今日停止开新仓")
+                if self.verbose_logging:
+                    self.Log(f"触发单日亏损限制 {dd:.2%}，今日停止开新仓")
 
         # 止损止盈检查，任何时段都执行，保护已有持仓
         for key in self.futures:
@@ -282,16 +289,19 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             else:
                 self.MarketOrder(symbol, -quantity)
 
-            self.Log(f"{key} 提交开仓 side={target_side} qty={quantity} "
-                     f"权重={weight:.2%} ATR={atr_val:.2f} "
-                     f"预估保证金/手={est_margin_per_contract:.0f} 剩余保证金={self.Portfolio.MarginRemaining:.0f}")
+            if self.verbose_logging:
+                self.Log(f"{key} 提交开仓 side={target_side} qty={quantity} "
+                         f"权重={weight:.2%} ATR={atr_val:.2f} "
+                         f"预估保证金/手={est_margin_per_contract:.0f} 剩余保证金={self.Portfolio.MarginRemaining:.0f}")
 
     # ------------------------------------------------------------------
     def OnOrderEvent(self, orderEvent):
         if orderEvent.Status != OrderStatus.Filled:
             return
 
-        self.Log(f"成交: {orderEvent.Symbol} {orderEvent.FillQuantity}@{orderEvent.FillPrice}")
+        self.trade_count += 1
+        if self.verbose_logging:
+            self.Log(f"成交: {orderEvent.Symbol} {orderEvent.FillQuantity}@{orderEvent.FillPrice}")
 
         # 找到这笔成交对应哪个品种
         key = None
@@ -354,7 +364,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         if hit_stop or hit_target:
             self.Liquidate(symbol)
             reason = "止损" if hit_stop else "止盈"
-            self.Log(f"{key} 提交{reason}平仓 @ {price:.2f}")
+            if self.verbose_logging:
+                self.Log(f"{key} 提交{reason}平仓 @ {price:.2f}")
 
     # ------------------------------------------------------------------
     def FlattenAll(self):
@@ -362,4 +373,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             symbol = self.mapped_symbol[key]
             if symbol is not None and self.Portfolio[symbol].Invested:
                 self.Liquidate(symbol)
-                self.Log(f"{key} 收盘前强制平仓")
+                if self.verbose_logging:
+                    self.Log(f"{key} 收盘前强制平仓")
+
+    # ------------------------------------------------------------------
+    def OnEndOfAlgorithm(self):
+        # 只在回测结束时打一条汇总日志，不管verbose_logging开关都保留，
+        # 这样即使全程静默也能知道策略到底交易了多少次
+        self.Log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.Portfolio.TotalPortfolioValue:.2f}")

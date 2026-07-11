@@ -76,7 +76,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         # ------------------ 品种开关：控制本次运行交易哪些品种 ------------------
         self.trade_mnq = True   # Micro E-mini Nasdaq-100
-        self.trade_mes = True   # Micro E-mini S&P 500
+        self.trade_mes = False   # Micro E-mini S&P 500
         self.trade_mym = False  # Micro E-mini Dow Jones（默认关闭，需要时改成True）
 
         # 每点价值（多加品种时在这里补充 ticker -> 点值 和 开关）
@@ -90,6 +90,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 默认关闭逐笔日志；调试单个具体问题时再临时打开，或用QC自带的
         # Orders/Trades面板看成交明细，不占日志配额。
         self.verbose_logging = False
+
+        # 诊断日志：不像verbose_logging那样逐笔记录（配额扛不住完整多年回测），
+        # 只记录展期/状态自愈这类关键事件 + 每月一条心跳（成交笔数、当前持仓状态摘要），
+        # 用很小的日志量就能覆盖完整回测区间，方便定位"到底是哪个月开始不交易了"
+        self.diagnostic_logging = True
         self.trade_count = 0
 
         # 交易时段（美东时间），避开开盘头几分钟噪音，收盘前留出平仓缓冲
@@ -175,9 +180,10 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         self.set_warm_up(timedelta(days=15))
 
-        # ------------------ 日程：重置日内状态 / 收盘前强制平仓 ------------------
+        # ------------------ 日程：重置日内状态 / 收盘前强制平仓 / 每月心跳 ------------------
         self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 30), self.reset_daily_state)
         self.schedule.on(self.date_rules.every_day(), self.time_rules.at(15, 45), self.flatten_all)
+        self.schedule.on(self.date_rules.month_start(), self.time_rules.at(9, 31), self._monthly_heartbeat)
 
     # ------------------------------------------------------------------
     def _make_consolidation_handler(self, key):
@@ -185,6 +191,18 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             if self.atr_ind[key].is_ready:
                 self.atr_window[key].add(self.atr_ind[key].current.value)
         return handler
+
+    # ------------------------------------------------------------------
+    def _monthly_heartbeat(self):
+        if not self.diagnostic_logging:
+            return
+        status = " ".join(
+            f"{k}[side={self.position_side[k]},hold={'Y' if self.holding_symbol[k] else 'N'},"
+            f"cd={'Y' if (self.cooldown_until[k] is not None and self.time < self.cooldown_until[k]) else 'N'}]"
+            for k in self.futures
+        )
+        self.log(f"[心跳]{self.time.date()} 总成交={self.trade_count} "
+                 f"权益={self.portfolio.total_portfolio_value:.0f} halt={self.trading_halted_today} {status}")
 
     # ------------------------------------------------------------------
     def reset_daily_state(self):
@@ -203,8 +221,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             if self.position_side[key] != 0 and not actually_invested:
                 # 我们以为有仓位，但账户实际没有 -> 大概率是某笔平仓成交没被正确
                 # 记账（比如强平/订单竞争），按实际情况纠正为空仓，避免永久卡死
-                if self.verbose_logging:
-                    self.log(f"{key} 检测到状态与实际持仓不一致(记账认为持仓,实际空仓)，自动重置为空仓")
+                if self.verbose_logging or self.diagnostic_logging:
+                    self.log(f"[自愈]{self.time.date()} {key} 记账认为持仓,实际空仓,重置为空仓")
                 self._reset_position_state(key)
 
             elif self.position_side[key] == 0 and holding is not None and holding in self.portfolio and self.portfolio[holding].invested:
@@ -212,8 +230,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 # 用当前市价当作入场价的保守估计（无法还原真实入场价，只能这样兜底）
                 actual_qty = self.portfolio[holding].quantity
                 if actual_qty != 0:
-                    if self.verbose_logging:
-                        self.log(f"{key} 检测到状态与实际持仓不一致(记账认为空仓,实际持仓)，按实际持仓纠正")
+                    if self.verbose_logging or self.diagnostic_logging:
+                        self.log(f"[自愈]{self.time.date()} {key} 记账认为空仓,实际持仓,按实际纠正")
                     self.position_side[key] = 1 if actual_qty > 0 else -1
                     self.holding_symbol[key] = holding
                     self.entry_price[key] = self.portfolio[holding].average_price
@@ -272,8 +290,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     and new_mapped is not None and new_mapped != old_holding):
                 if self._has_valid_price(old_holding):
                     self.liquidate(old_holding)
-                    if self.verbose_logging:
-                        self.log(f"{key} 合约展期，主动平掉旧合约 {old_holding.value}")
+                    if self.verbose_logging or self.diagnostic_logging:
+                        self.log(f"[展期]{self.time.date()} {key} 平掉旧合约 {old_holding.value}")
             self.mapped_symbol[key] = new_mapped
 
         # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓（止损止盈仍照常执行）

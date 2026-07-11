@@ -30,6 +30,10 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
       - 移动止损：浮盈达到设定倍数后启动，替换掉固定止盈，让趋势利润奔跑
       - 单日盈利目标（可选）：达到目标后当日停止开新仓，锁定利润
 
+    v5：加入品种开关（trade_mnq / trade_mes / trade_mym），可以自由选择本次
+    运行只交易哪几个品种。风险平价的权重分配、订单数/连续亏损等风控计数，
+    都只会覆盖开关打开的品种，关闭的品种不订阅数据、不占用任何风险预算。
+
     使用前请确认：
       - 账户/回测环境已开通期货数据权限（CME 期货数据在 QC 云端为付费订阅）
       - 保证金估算用 Leverage 做近似，不是精确的期货SPAN保证金
@@ -70,6 +74,18 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.trailing_activation_r         = 1.0   # 浮盈达到N倍初始止损距离后，启动移动止损
         self.trailing_atr_mult             = 1.5   # 移动止损跟踪距离 = N倍ATR
 
+        # ------------------ 品种开关：控制本次运行交易哪些品种 ------------------
+        self.trade_mnq = True   # Micro E-mini Nasdaq-100
+        self.trade_mes = True   # Micro E-mini S&P 500
+        self.trade_mym = False  # Micro E-mini Dow Jones（默认关闭，需要时改成True）
+
+        # 每点价值（多加品种时在这里补充 ticker -> 点值 和 开关）
+        self.instrument_config = {
+            "MNQ": {"enabled": self.trade_mnq, "multiplier": 2.0},
+            "MES": {"enabled": self.trade_mes, "multiplier": 5.0},
+            "MYM": {"enabled": self.trade_mym, "multiplier": 0.5},
+        }
+
         # 免费/低等级账户日志配额只有10KB/天，逐笔打印很快就会被截断。
         # 默认关闭逐笔日志；调试单个具体问题时再临时打开，或用QC自带的
         # Orders/Trades面板看成交明细，不占日志配额。
@@ -80,28 +96,26 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.session_start_minutes = 9 * 60 + 35
         self.session_end_minutes   = 15 * 60 + 45
 
-        # ------------------ 期货合约：连续合约，反向比例调整，便于计算指标 ------------------
+        # ------------------ 期货合约：只订阅开关打开的品种，连续合约、反向比例调整 ------------------
         self.futures = {}
-        self.futures["MNQ"] = self.add_future(
-            "MNQ",
-            Resolution.MINUTE,
-            data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
-            data_mapping_mode=DataMappingMode.OPEN_INTEREST,
-            contract_depth_offset=0
-        )
-        self.futures["MES"] = self.add_future(
-            "MES",
-            Resolution.MINUTE,
-            data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
-            data_mapping_mode=DataMappingMode.OPEN_INTEREST,
-            contract_depth_offset=0
-        )
+        self.multiplier = {}
+        for key, cfg in self.instrument_config.items():
+            if not cfg["enabled"]:
+                continue
+            self.futures[key] = self.add_future(
+                key,
+                Resolution.MINUTE,
+                data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
+                data_mapping_mode=DataMappingMode.OPEN_INTEREST,
+                contract_depth_offset=0
+            )
+            self.multiplier[key] = cfg["multiplier"]
+
+        if len(self.futures) == 0:
+            raise Exception("至少需要打开一个品种的交易开关（trade_mnq / trade_mes / trade_mym）")
 
         for fut in self.futures.values():
             fut.set_filter(0, 90)  # 只考虑90天内到期的近月合约
-
-        # 每点价值
-        self.multiplier = {"MNQ": 2.0, "MES": 5.0}
 
         # ------------------ 指标：挂在5分钟Consolidator上，减少信号噪音 ------------------
         self.ema_fast   = {}
@@ -131,25 +145,25 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             self.register_indicator(symbol, self.adx_ind[key], consolidator)
 
         # 当前实际可交易（映射）合约
-        self.mapped_symbol = {"MNQ": None, "MES": None}
+        self.mapped_symbol = {k: None for k in self.futures}
 
         # 持仓状态（只在订单真正Filled后才更新，见 on_order_event）
-        self.position_side = {"MNQ": 0, "MES": 0}   # 1多 / -1空 / 0空仓
-        self.stop_price    = {"MNQ": None, "MES": None}
-        self.target_price  = {"MNQ": None, "MES": None}
+        self.position_side = {k: 0 for k in self.futures}   # 1多 / -1空 / 0空仓
+        self.stop_price    = {k: None for k in self.futures}
+        self.target_price  = {k: None for k in self.futures}
 
         # 挂单期间的待定止损/止盈距离（点数），成交后用实际成交价换算成价位
-        self.pending_stop_dist   = {"MNQ": None, "MES": None}
-        self.pending_target_dist = {"MNQ": None, "MES": None}
-        self.pending_side        = {"MNQ": 0, "MES": 0}
+        self.pending_stop_dist   = {k: None for k in self.futures}
+        self.pending_target_dist = {k: None for k in self.futures}
+        self.pending_side        = {k: 0 for k in self.futures}
 
         # ---- 风控状态 ----
-        self.entry_price       = {"MNQ": None, "MES": None}  # 当前持仓的实际成交入场价
-        self.initial_stop_dist = {"MNQ": None, "MES": None}  # 入场时的止损距离（点数），用于计算移动止损触发点
-        self.trailing_active   = {"MNQ": False, "MES": False}
-        self.trades_today      = {"MNQ": 0, "MES": 0}         # 单品种当日开仓次数
-        self.cooldown_until    = {"MNQ": None, "MES": None}   # 止损冷却期截止时间
-        self.consecutive_losses = 0                            # 单日连续亏损笔数（两品种合计）
+        self.entry_price       = {k: None for k in self.futures}  # 当前持仓的实际成交入场价
+        self.initial_stop_dist = {k: None for k in self.futures}  # 入场时的止损距离（点数），用于计算移动止损触发点
+        self.trailing_active   = {k: False for k in self.futures}
+        self.trades_today      = {k: 0 for k in self.futures}      # 单品种当日开仓次数
+        self.cooldown_until    = {k: None for k in self.futures}   # 止损冷却期截止时间
+        self.consecutive_losses = 0                            # 单日连续亏损笔数（所有已启用品种合计）
         self.daily_orders_count = 0                             # 单日订单数（安全阀计数）
 
         self.daily_start_equity  = self.portfolio.total_portfolio_value
@@ -172,7 +186,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
     def reset_daily_state(self):
         self.daily_start_equity = self.portfolio.total_portfolio_value
         self.trading_halted_today = False
-        self.trades_today = {"MNQ": 0, "MES": 0}
+        self.trades_today = {k: 0 for k in self.futures}
         self.consecutive_losses = 0
         self.daily_orders_count = 0
 

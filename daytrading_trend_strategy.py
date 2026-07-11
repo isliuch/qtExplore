@@ -104,7 +104,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 诊断日志：不像verbose_logging那样逐笔记录（配额扛不住完整多年回测），
         # 只记录展期/状态自愈这类关键事件 + 每月一条心跳（成交笔数、当前持仓状态摘要），
         # 用很小的日志量就能覆盖完整回测区间，方便定位"到底是哪个月开始不交易了"
-        self.diagnostic_logging = True
+        # v13 调试框架：
+        # 0 = 关闭
+        # 1 = 仅交易级日志
+        # 2 = 完整链路日志
+        self.debug_level = 2
+        self.diagnostic_logging = self.debug_level > 0
         self.trade_count = 0
 
         # 交易时段（美东时间），避开开盘头几分钟噪音，收盘前留出平仓缓冲
@@ -393,6 +398,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         return 0
 
     # ------------------------------------------------------------------
+    def _debug_log(self, level: int, message: str) -> None:
+        """
+        v13统一调试日志入口。
+        level:
+        1 - 交易级
+        2 - 完整诊断
+        """
+        if getattr(self, "debug_level", 0) >= level:
+            self.log(message)
+
     def _rebalance(self, signals):
         # v12: 全链路诊断日志
         # 用于定位策略“不下单”的具体环节：
@@ -413,8 +428,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             target_side = signals[key]
             current_side = self.position_side[key]
 
-            if self.diagnostic_logging:
-                self.log(
+            if self.debug_level >= 2:
+                self._debug_log(2,
                     f"[状态] {key} signal={target_side} "
                     f"position={current_side} "
                     f"mapped={self.mapped_symbol[key]}"
@@ -462,8 +477,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
             quantity = int(risk_dollars_leg / dollar_risk_per_contract)
 
-            if self.diagnostic_logging:
-                self.log(
+            if self.debug_level >= 2:
+                self._debug_log(2,
                     f"[风险计算]{key} "
                     f"equity={equity:.0f} "
                     f"riskBudget={risk_dollars_leg:.2f} "
@@ -484,8 +499,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
             # 诊断quantity被保证金限制的情况
             if max_affordable < 1:
-                if self.diagnostic_logging:
-                    self.log(
+                if self.debug_level >= 2:
+                    self._debug_log(2,
                         f"[仓位阻断]{self.time.date()} {key} "
                         f"riskQty={quantity} "
                         f"marginNeed={est_margin_per_contract} "
@@ -493,8 +508,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     )
                 continue
 
-            if self.diagnostic_logging:
-                self.log(
+            if self.debug_level >= 2:
+                self._debug_log(2,
                     f"[保证金计算]{key} "
                     f"marginNeed={est_margin_per_contract:.0f} "
                     f"remaining={self.portfolio.margin_remaining:.0f} "
@@ -504,8 +519,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             quantity = min(quantity, max_affordable)
 
             if quantity < 1:
-                if self.diagnostic_logging:
-                    self.log(f"[最终阻断]{key} quantity={quantity}")
+                if self.debug_level >= 2:
+                    self._debug_log(2,f"[最终阻断]{key} quantity={quantity}")
                 continue
 
             # 记录待成交方向和止损/止盈距离，实际价位等 on_order_event 里成交后再算
@@ -513,8 +528,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             self.pending_stop_dist[key] = stop_distance_points
             self.pending_target_dist[key] = target_distance_points
 
-            if self.diagnostic_logging:
-                self.log(
+            if self.debug_level >= 2:
+                self._debug_log(2,
                     f"[提交订单]{key} symbol={symbol} "
                     f"side={target_side} quantity={quantity}"
                 )
@@ -655,3 +670,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 只在回测结束时打一条汇总日志，不管verbose_logging开关都保留，
         # 这样即使全程静默也能知道策略到底交易了多少次
         self.log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.portfolio.total_portfolio_value:.2f}")
+
+    def _strategy_snapshot(self):
+        """
+        v13每日状态快照，方便定位长期停止交易。
+        """
+        if getattr(self, "debug_level", 0) >= 1:
+            self._debug_log(
+                1,
+                f"[状态快照] {self.Time.date()} "
+                f"equity={self.Portfolio.TotalPortfolioValue:.2f} "
+                f"cash={self.Portfolio.Cash:.2f} "
+                f"margin={self.Portfolio.MarginRemaining:.2f}"
+            )

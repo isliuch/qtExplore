@@ -195,6 +195,48 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.daily_orders_count = 0
 
     # ------------------------------------------------------------------
+    def _reconcile_state(self):
+        for key, fut in self.futures.items():
+            holding = self.holding_symbol[key]
+            actually_invested = holding is not None and holding in self.portfolio and self.portfolio[holding].invested
+
+            if self.position_side[key] != 0 and not actually_invested:
+                # 我们以为有仓位，但账户实际没有 -> 大概率是某笔平仓成交没被正确
+                # 记账（比如强平/订单竞争），按实际情况纠正为空仓，避免永久卡死
+                if self.verbose_logging:
+                    self.log(f"{key} 检测到状态与实际持仓不一致(记账认为持仓,实际空仓)，自动重置为空仓")
+                self._reset_position_state(key)
+
+            elif self.position_side[key] == 0 and holding is not None and holding in self.portfolio and self.portfolio[holding].invested:
+                # 反过来：账户实际有仓位，但我们以为是空仓 -> 同样按实际持仓纠正，
+                # 用当前市价当作入场价的保守估计（无法还原真实入场价，只能这样兜底）
+                actual_qty = self.portfolio[holding].quantity
+                if actual_qty != 0:
+                    if self.verbose_logging:
+                        self.log(f"{key} 检测到状态与实际持仓不一致(记账认为空仓,实际持仓)，按实际持仓纠正")
+                    self.position_side[key] = 1 if actual_qty > 0 else -1
+                    self.holding_symbol[key] = holding
+                    self.entry_price[key] = self.portfolio[holding].average_price
+                    atr_val = self.atr_ind[key].current.value if self.atr_ind[key].is_ready else None
+                    self.initial_stop_dist[key] = atr_val * self.atr_stop_mult if atr_val else None
+                    self.stop_price[key] = None
+                    self.target_price[key] = None
+                    self.trailing_active[key] = False
+
+    # ------------------------------------------------------------------
+    def _reset_position_state(self, key):
+        self.position_side[key] = 0
+        self.stop_price[key] = None
+        self.target_price[key] = None
+        self.pending_side[key] = 0
+        self.pending_stop_dist[key] = None
+        self.pending_target_dist[key] = None
+        self.entry_price[key] = None
+        self.initial_stop_dist[key] = None
+        self.trailing_active[key] = False
+        self.holding_symbol[key] = None
+
+    # ------------------------------------------------------------------
     def _in_session(self):
         t = self.time
         minutes = t.hour * 60 + t.minute
@@ -211,6 +253,13 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
     def on_data(self, slice):
         if self.is_warming_up:
             return
+
+        # ---- 状态自愈：拿账户实际持仓校验我们自己维护的仓位状态 ----
+        # 万一因为任何原因（保证金强平、订单竞争等未预见情况）导致内部记账和
+        # 实际持仓对不上，之前的设计会永久卡死（以为有仓位、但平仓单发不出去，
+        # 从此不再交易）。这里每根bar都做一次核对，发现不一致直接按实际持仓纠正，
+        # 保证策略不会因为记账bug而永久停摆。
+        self._reconcile_state()
 
         # 更新映射合约（每次rollover后 mapped 会变化）；如果当前持仓的合约不再是
         # 最新近月合约，说明发生了展期，主动平掉旧合约，而不是等摘牌被动强平
@@ -404,16 +453,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 else:
                     self.consecutive_losses = 0
 
-            self.position_side[key] = 0
-            self.stop_price[key] = None
-            self.target_price[key] = None
-            self.pending_side[key] = 0
-            self.pending_stop_dist[key] = None
-            self.pending_target_dist[key] = None
-            self.entry_price[key] = None
-            self.initial_stop_dist[key] = None
-            self.trailing_active[key] = False
-            self.holding_symbol[key] = None
+            self._reset_position_state(key)
             return
 
         # 开仓成交：只有这时才正式记录持仓方向、持仓合约和止损/止盈价位

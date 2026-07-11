@@ -111,7 +111,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 key,
                 Resolution.MINUTE,
                 data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
-                data_mapping_mode=DataMappingMode.OPEN_INTEREST,
+                data_mapping_mode=DataMappingMode.LAST_TRADING_DAY,  # 按到期日展期，不依赖持仓量数据，更稳定
                 contract_depth_offset=0
             )
             self.multiplier[key] = cfg["multiplier"]
@@ -198,6 +198,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             return
         status = " ".join(
             f"{k}[side={self.position_side[k]},hold={'Y' if self.holding_symbol[k] else 'N'},"
+            f"mapped={'Y' if self.mapped_symbol.get(k) else 'N'},"
             f"cd={'Y' if (self.cooldown_until[k] is not None and self.time < self.cooldown_until[k]) else 'N'}]"
             for k in self.futures
         )
@@ -286,6 +287,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         for key, fut in self.futures.items():
             new_mapped = fut.mapped
             old_holding = self.holding_symbol[key]
+
+            # 诊断：mapped合约变成None，说明展期机制没能解析出下一张可交易合约，
+            # 后续所有开仓都会被_has_valid_price挡住——只在状态刚变化时记一次，避免刷屏
+            if new_mapped is None and self.mapped_symbol.get(key) is not None:
+                if self.verbose_logging or self.diagnostic_logging:
+                    self.log(f"[警告]{self.time.date()} {key} mapped合约变为None，展期解析失败")
+            elif new_mapped is not None and self.mapped_symbol.get(key) is None and self.mapped_symbol.get(key) != new_mapped:
+                if self.verbose_logging or self.diagnostic_logging:
+                    self.log(f"[恢复]{self.time.date()} {key} mapped合约恢复为 {new_mapped.value}")
+
             if (self.position_side[key] != 0 and old_holding is not None
                     and new_mapped is not None and new_mapped != old_holding):
                 if self._has_valid_price(old_holding):

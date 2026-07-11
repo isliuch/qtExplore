@@ -6,36 +6,34 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
     """
     日内趋势跟踪策略：MNQ (Micro E-mini Nasdaq-100) + MES (Micro E-mini S&P 500)
 
-    v2 修复日志（针对第一版回测报错）：
-      1. [Insufficient buying power] 原来的仓位公式只按"风险预算/止损距离"算手数，
-         完全没检查保证金够不够，导致下出账户根本扛不住的巨大仓位。
-         -> 加入基于 Leverage 的保证金估算，用 MarginRemaining 二次封顶手数。
-      2. [security does not have an accurate price] 每季度合约展期(3/6/9/12月)那天，
-         Mapped 合约切换瞬间新合约可能还没有数据，直接用来下单/取价会报错。
-         -> 下单和取价前都检查 HasData 且 Price > 0。
-      3. [超过10000笔订单上限] 原来直接在1分钟频率上算EMA/ADX/ATR，信号噪音大、
-         换仓过于频繁。
-         -> 指标改成挂在5分钟K线合成器(Consolidator)上，1分钟数据只用于精确执行
-            止损/止盈/收盘平仓，显著降低下单频率。
-      4. [仓位状态与实际成交不同步] 原来下单后立刻假设成交并记录持仓方向/止损价，
-         一旦订单被拒绝（比如报错1），仓位状态和实际持仓就对不上，后续逻辑会
-         错误地认为"已有仓位"从而跳过应有的交易。
-         -> 仓位状态、止损止盈价格改为在 OnOrderEvent 里等订单真正 Filled 之后才写入。
+    v3：全面改用 QuantConnect 新版 Python API 命名规范（PEP8 下划线风格）。
+    旧版 Pascal 命名（SetStartDate / AddFuture / Resolution.Minute 等）在当前
+    Lean 云端IDE里已经不再兼容，必须用 set_start_date / add_future /
+    Resolution.MINUTE 这种写法，枚举成员也要全大写下划线。
+
+    v2 修复日志（针对更早一版回测报错，逻辑不变，仅命名规范更新）：
+      1. [Insufficient buying power] 加入基于 Leverage 的保证金估算，
+         用 margin_remaining 二次封顶手数，不再只按止损距离算风险敞口。
+      2. [does not have an accurate price] 展期日新合约数据未到时，
+         下单/取价前统一检查 has_data 且 price > 0。
+      3. [超过10000笔订单上限] 指标改成挂在5分钟Consolidator上，
+         1分钟数据只用于精确执行止损/止盈/收盘平仓。
+      4. [仓位状态与实际成交不同步] 仓位状态、止损止盈价格只在
+         on_order_event 里订单真正 Filled 之后才落地。
+      5. [日志配额10KB/天] 逐笔日志默认关闭，只保留回测结束汇总。
 
     使用前请确认：
       - 账户/回测环境已开通期货数据权限（CME 期货数据在 QC 云端为付费订阅）
-      - 免费/低等级账户有订单数量上限，长期回测+高频调仓容易触发，必要时降频或升级账户
-      - 保证金估算用的是 Security.Leverage 做近似，不是精确的期货SPAN保证金，
-        实盘/精细回测建议换成券商真实保证金数据
+      - 保证金估算用 Leverage 做近似，不是精确的期货SPAN保证金
       - 所有参数都需要样本内/样本外回测调优
     """
 
-    def Initialize(self):
-        self.SetStartDate(2022, 1, 1)
-        self.SetEndDate(2026, 7, 9)   # 按需调整；不设EndDate的话QC默认跑到"今天"
-        self.SetCash(50000)
-        self.SetTimeZone(TimeZones.NewYork)
-        self.SetBrokerageModel(BrokerageName.InteractiveBrokersBrokerage, AccountType.Margin)
+    def initialize(self):
+        self.set_start_date(2025, 1, 1)
+        self.set_end_date(2026, 7, 8)   # 按数据源实际覆盖范围调整
+        self.set_cash(50000)
+        self.set_time_zone(TimeZones.NEW_YORK)
+        self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE, AccountType.MARGIN)
 
         # ------------------ 策略参数 ------------------
         self.fast_period   = 20      # 快速EMA周期（基于5分钟K线）
@@ -53,11 +51,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.atr_target_mult   = 3.0    # 止盈距离 = N倍ATR
         self.daily_loss_limit  = 0.02   # 单日最大亏损占权益比例，触发后当日停止开新仓
 
-        self.margin_safety_buffer = 0.5  # 只使用 MarginRemaining 的这个比例做新仓位，留缓冲
+        self.margin_safety_buffer = 0.5  # 只使用 margin_remaining 的这个比例做新仓位，留缓冲
 
         # 免费/低等级账户日志配额只有10KB/天，逐笔打印很快就会被截断。
         # 默认关闭逐笔日志；调试单个具体问题时再临时打开，或用QC自带的
-        # Orders/Charts面板看成交明细，不用日志也能查。
+        # Orders/Trades面板看成交明细，不占日志配额。
         self.verbose_logging = False
         self.trade_count = 0
 
@@ -67,23 +65,23 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         # ------------------ 期货合约：连续合约，反向比例调整，便于计算指标 ------------------
         self.futures = {}
-        self.futures["MNQ"] = self.AddFuture(
+        self.futures["MNQ"] = self.add_future(
             "MNQ",
-            Resolution.Minute,
-            dataNormalizationMode=DataNormalizationMode.BackwardsRatio,
-            dataMappingMode=DataMappingMode.OpenInterest,
-            contractDepthOffset=0
+            Resolution.MINUTE,
+            data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
+            data_mapping_mode=DataMappingMode.OPEN_INTEREST,
+            contract_depth_offset=0
         )
-        self.futures["MES"] = self.AddFuture(
+        self.futures["MES"] = self.add_future(
             "MES",
-            Resolution.Minute,
-            dataNormalizationMode=DataNormalizationMode.BackwardsRatio,
-            dataMappingMode=DataMappingMode.OpenInterest,
-            contractDepthOffset=0
+            Resolution.MINUTE,
+            data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
+            data_mapping_mode=DataMappingMode.OPEN_INTEREST,
+            contract_depth_offset=0
         )
 
         for fut in self.futures.values():
-            fut.SetFilter(0, 90)  # 只考虑90天内到期的近月合约
+            fut.set_filter(0, 90)  # 只考虑90天内到期的近月合约
 
         # 每点价值
         self.multiplier = {"MNQ": 2.0, "MES": 5.0}
@@ -91,34 +89,34 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # ------------------ 指标：挂在5分钟Consolidator上，减少信号噪音 ------------------
         self.ema_fast   = {}
         self.ema_slow   = {}
-        self.atr        = {}
-        self.adx        = {}
+        self.atr_ind    = {}
+        self.adx_ind    = {}
         self.atr_window = {}
         self.consolidators = {}
 
         for key, fut in self.futures.items():
-            symbol = fut.Symbol
+            symbol = fut.symbol
 
             self.ema_fast[key]   = ExponentialMovingAverage(self.fast_period)
             self.ema_slow[key]   = ExponentialMovingAverage(self.slow_period)
-            self.atr[key]        = AverageTrueRange(self.atr_period, MovingAverageType.Wilders)
-            self.adx[key]        = AverageDirectionalIndex(self.adx_period)
+            self.atr_ind[key]        = AverageTrueRange(self.atr_period, MovingAverageType.WILDERS)
+            self.adx_ind[key]        = AverageDirectionalIndex(self.adx_period)
             self.atr_window[key] = RollingWindow[float](self.atr_lookback)
 
             consolidator = TradeBarConsolidator(timedelta(minutes=5))
-            consolidator.DataConsolidated += self._make_consolidation_handler(key)
-            self.SubscriptionManager.AddConsolidator(symbol, consolidator)
+            consolidator.data_consolidated += self._make_consolidation_handler(key)
+            self.subscription_manager.add_consolidator(symbol, consolidator)
             self.consolidators[key] = consolidator
 
-            self.RegisterIndicator(symbol, self.ema_fast[key], consolidator)
-            self.RegisterIndicator(symbol, self.ema_slow[key], consolidator)
-            self.RegisterIndicator(symbol, self.atr[key], consolidator)
-            self.RegisterIndicator(symbol, self.adx[key], consolidator)
+            self.register_indicator(symbol, self.ema_fast[key], consolidator)
+            self.register_indicator(symbol, self.ema_slow[key], consolidator)
+            self.register_indicator(symbol, self.atr_ind[key], consolidator)
+            self.register_indicator(symbol, self.adx_ind[key], consolidator)
 
         # 当前实际可交易（映射）合约
         self.mapped_symbol = {"MNQ": None, "MES": None}
 
-        # 持仓状态（只在订单真正Filled后才更新，见 OnOrderEvent）
+        # 持仓状态（只在订单真正Filled后才更新，见 on_order_event）
         self.position_side = {"MNQ": 0, "MES": 0}   # 1多 / -1空 / 0空仓
         self.stop_price    = {"MNQ": None, "MES": None}
         self.target_price  = {"MNQ": None, "MES": None}
@@ -128,56 +126,56 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.pending_target_dist = {"MNQ": None, "MES": None}
         self.pending_side        = {"MNQ": 0, "MES": 0}
 
-        self.daily_start_equity  = self.Portfolio.TotalPortfolioValue
+        self.daily_start_equity  = self.portfolio.total_portfolio_value
         self.trading_halted_today = False
 
-        self.SetWarmUp(timedelta(days=15))
+        self.set_warm_up(timedelta(days=15))
 
         # ------------------ 日程：重置日内状态 / 收盘前强制平仓 ------------------
-        self.Schedule.On(self.DateRules.EveryDay(), self.TimeRules.At(9, 30), self.ResetDailyState)
-        self.Schedule.On(self.DateRules.EveryDay(), self.TimeRules.At(15, 45), self.FlattenAll)
+        self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 30), self.reset_daily_state)
+        self.schedule.on(self.date_rules.every_day(), self.time_rules.at(15, 45), self.flatten_all)
 
     # ------------------------------------------------------------------
     def _make_consolidation_handler(self, key):
         def handler(sender, bar):
-            if self.atr[key].IsReady:
-                self.atr_window[key].Add(self.atr[key].Current.Value)
+            if self.atr_ind[key].is_ready:
+                self.atr_window[key].add(self.atr_ind[key].current.value)
         return handler
 
     # ------------------------------------------------------------------
-    def ResetDailyState(self):
-        self.daily_start_equity = self.Portfolio.TotalPortfolioValue
+    def reset_daily_state(self):
+        self.daily_start_equity = self.portfolio.total_portfolio_value
         self.trading_halted_today = False
 
     # ------------------------------------------------------------------
     def _in_session(self):
-        t = self.Time
+        t = self.time
         minutes = t.hour * 60 + t.minute
         return self.session_start_minutes <= minutes <= self.session_end_minutes
 
     # ------------------------------------------------------------------
     def _has_valid_price(self, symbol):
         return (symbol is not None
-                and self.Securities.ContainsKey(symbol)
-                and self.Securities[symbol].HasData
-                and self.Securities[symbol].Price > 0)
+                and symbol in self.securities
+                and self.securities[symbol].has_data
+                and self.securities[symbol].price > 0)
 
     # ------------------------------------------------------------------
-    def OnData(self, slice):
-        if self.IsWarmingUp:
+    def on_data(self, slice):
+        if self.is_warming_up:
             return
 
-        # 更新映射合约（每次rollover后 Mapped 会变化）
+        # 更新映射合约（每次rollover后 mapped 会变化）
         for key, fut in self.futures.items():
-            self.mapped_symbol[key] = fut.Mapped
+            self.mapped_symbol[key] = fut.mapped
 
         # 日内风控：当日亏损超限，停止开新仓（止损止盈仍照常执行）
         if not self.trading_halted_today and self.daily_start_equity > 0:
-            dd = (self.Portfolio.TotalPortfolioValue - self.daily_start_equity) / self.daily_start_equity
+            dd = (self.portfolio.total_portfolio_value - self.daily_start_equity) / self.daily_start_equity
             if dd <= -self.daily_loss_limit:
                 self.trading_halted_today = True
                 if self.verbose_logging:
-                    self.Log(f"触发单日亏损限制 {dd:.2%}，今日停止开新仓")
+                    self.log(f"触发单日亏损限制 {dd:.2%}，今日停止开新仓")
 
         # 止损止盈检查，任何时段都执行，保护已有持仓
         for key in self.futures:
@@ -195,23 +193,23 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
     # ------------------------------------------------------------------
     def _get_signal(self, key):
         """趋势 + ATR过滤 信号：1做多 -1做空 0不操作"""
-        if not (self.ema_fast[key].IsReady and self.ema_slow[key].IsReady
-                and self.atr[key].IsReady and self.adx[key].IsReady):
+        if not (self.ema_fast[key].is_ready and self.ema_slow[key].is_ready
+                and self.atr_ind[key].is_ready and self.adx_ind[key].is_ready):
             return 0
-        if self.atr_window[key].Count < self.atr_lookback:
+        if self.atr_window[key].count < self.atr_lookback:
             return 0
 
         atr_values = sorted(self.atr_window[key])
-        current_atr = self.atr[key].Current.Value
+        current_atr = self.atr_ind[key].current.value
         rank = sum(1 for v in atr_values if v <= current_atr) / len(atr_values)
         if rank < self.atr_low_pct or rank > self.atr_high_pct:
             return 0
 
-        if self.adx[key].Current.Value < self.adx_threshold:
+        if self.adx_ind[key].current.value < self.adx_threshold:
             return 0
 
-        fast = self.ema_fast[key].Current.Value
-        slow = self.ema_slow[key].Current.Value
+        fast = self.ema_fast[key].current.value
+        slow = self.ema_slow[key].current.value
 
         if fast > slow:
             return 1
@@ -225,8 +223,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         inv_atr = {}
         for key in self.futures:
-            if self.atr[key].IsReady and self.atr[key].Current.Value > 0:
-                inv_atr[key] = 1.0 / self.atr[key].Current.Value
+            if self.atr_ind[key].is_ready and self.atr_ind[key].current.value > 0:
+                inv_atr[key] = 1.0 / self.atr_ind[key].current.value
 
         total_inv_atr = sum(inv_atr.get(k, 0) for k in active) if active else 0
 
@@ -241,19 +239,19 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
             # 信号翻转或归零 -> 先平仓
             if target_side != current_side and current_side != 0:
-                self.Liquidate(symbol)
+                self.liquidate(symbol)
                 continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
             if target_side == 0 or current_side != 0:
                 continue
 
             # ---- 风险平价手数（第一层：按ATR止损风险预算）----
-            equity = self.Portfolio.TotalPortfolioValue
+            equity = self.portfolio.total_portfolio_value
             risk_dollars_total = equity * self.total_risk_budget
             weight = inv_atr[key] / total_inv_atr if total_inv_atr > 0 else 0
             risk_dollars_leg = risk_dollars_total * weight
 
-            atr_val = self.atr[key].Current.Value
+            atr_val = self.atr_ind[key].current.value
             stop_distance_points = atr_val * self.atr_stop_mult
             target_distance_points = atr_val * self.atr_target_mult
             dollar_risk_per_contract = stop_distance_points * self.multiplier[key]
@@ -264,59 +262,59 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             quantity = int(risk_dollars_leg / dollar_risk_per_contract)
 
             # ---- 第二层：保证金硬约束，防止风险预算算出账户扛不住的手数 ----
-            price = self.Securities[symbol].Price
-            leverage = max(self.Securities[symbol].Leverage, 1.0)
+            price = self.securities[symbol].price
+            leverage = max(self.securities[symbol].leverage, 1.0)
             notional_per_contract = price * self.multiplier[key]
             est_margin_per_contract = notional_per_contract / leverage
 
             if est_margin_per_contract <= 0:
                 continue
 
-            max_affordable = int((self.Portfolio.MarginRemaining * self.margin_safety_buffer)
+            max_affordable = int((self.portfolio.margin_remaining * self.margin_safety_buffer)
                                   / est_margin_per_contract)
             quantity = min(quantity, max_affordable)
 
             if quantity < 1:
                 continue
 
-            # 记录待成交方向和止损/止盈距离，实际价位等 OnOrderEvent 里成交后再算
+            # 记录待成交方向和止损/止盈距离，实际价位等 on_order_event 里成交后再算
             self.pending_side[key] = target_side
             self.pending_stop_dist[key] = stop_distance_points
             self.pending_target_dist[key] = target_distance_points
 
             if target_side == 1:
-                self.MarketOrder(symbol, quantity)
+                self.market_order(symbol, quantity)
             else:
-                self.MarketOrder(symbol, -quantity)
+                self.market_order(symbol, -quantity)
 
             if self.verbose_logging:
-                self.Log(f"{key} 提交开仓 side={target_side} qty={quantity} "
+                self.log(f"{key} 提交开仓 side={target_side} qty={quantity} "
                          f"权重={weight:.2%} ATR={atr_val:.2f} "
-                         f"预估保证金/手={est_margin_per_contract:.0f} 剩余保证金={self.Portfolio.MarginRemaining:.0f}")
+                         f"预估保证金/手={est_margin_per_contract:.0f} 剩余保证金={self.portfolio.margin_remaining:.0f}")
 
     # ------------------------------------------------------------------
-    def OnOrderEvent(self, orderEvent):
-        if orderEvent.Status != OrderStatus.Filled:
+    def on_order_event(self, order_event):
+        if order_event.status != OrderStatus.FILLED:
             return
 
         self.trade_count += 1
         if self.verbose_logging:
-            self.Log(f"成交: {orderEvent.Symbol} {orderEvent.FillQuantity}@{orderEvent.FillPrice}")
+            self.log(f"成交: {order_event.symbol} {order_event.fill_quantity}@{order_event.fill_price}")
 
         # 找到这笔成交对应哪个品种
         key = None
         for k, sym in self.mapped_symbol.items():
-            if sym is not None and sym == orderEvent.Symbol:
+            if sym is not None and sym == order_event.symbol:
                 key = k
                 break
         if key is None:
             return
 
-        fill_price = orderEvent.FillPrice
-        net_qty = self.Portfolio[orderEvent.Symbol].Quantity
+        fill_price = order_event.fill_price
+        net_qty = self.portfolio[order_event.symbol].quantity
 
         if net_qty == 0:
-            # 平仓成交（Liquidate对应的Filled事件）
+            # 平仓成交（liquidate对应的Filled事件）
             self.position_side[key] = 0
             self.stop_price[key] = None
             self.target_price[key] = None
@@ -353,7 +351,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         if not self._has_valid_price(symbol):
             return
 
-        price = self.Securities[symbol].Price
+        price = self.securities[symbol].price
         side = self.position_side[key]
         stop = self.stop_price[key]
         target = self.target_price[key]
@@ -362,22 +360,22 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         hit_target = target is not None and ((side == 1 and price >= target) or (side == -1 and price <= target))
 
         if hit_stop or hit_target:
-            self.Liquidate(symbol)
-            reason = "止损" if hit_stop else "止盈"
+            self.liquidate(symbol)
             if self.verbose_logging:
-                self.Log(f"{key} 提交{reason}平仓 @ {price:.2f}")
+                reason = "止损" if hit_stop else "止盈"
+                self.log(f"{key} 提交{reason}平仓 @ {price:.2f}")
 
     # ------------------------------------------------------------------
-    def FlattenAll(self):
+    def flatten_all(self):
         for key, fut in self.futures.items():
             symbol = self.mapped_symbol[key]
-            if symbol is not None and self.Portfolio[symbol].Invested:
-                self.Liquidate(symbol)
+            if symbol is not None and self.portfolio[symbol].invested:
+                self.liquidate(symbol)
                 if self.verbose_logging:
-                    self.Log(f"{key} 收盘前强制平仓")
+                    self.log(f"{key} 收盘前强制平仓")
 
     # ------------------------------------------------------------------
-    def OnEndOfAlgorithm(self):
+    def on_end_of_algorithm(self):
         # 只在回测结束时打一条汇总日志，不管verbose_logging开关都保留，
         # 这样即使全程静默也能知道策略到底交易了多少次
-        self.Log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.Portfolio.TotalPortfolioValue:.2f}")
+        self.log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.portfolio.total_portfolio_value:.2f}")

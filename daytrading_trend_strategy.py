@@ -86,6 +86,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             "MYM": {"enabled": self.trade_mym, "multiplier": 0.5},
         }
 
+        # v11修复：期货保证金不能使用 price*multiplier/leverage 估算。
+        # QC某些期货对象的leverage会返回1，导致把期货当股票全额占用资金，
+        # 在MNQ上涨后会出现 quantity=0，从而永久没有订单。
+        # 这里使用近似SPAN保证金，仅用于仓位上限控制。
+        self.futures_margin = {
+            "MNQ": 2500,   # Micro Nasdaq-100
+            "MES": 1500,   # Micro S&P500
+            "MYM": 1000    # Micro Dow
+        }
+
         # 免费/低等级账户日志配额只有10KB/天，逐笔打印很快就会被截断。
         # 默认关闭逐笔日志；调试单个具体问题时再临时打开，或用QC自带的
         # Orders/Trades面板看成交明细，不占日志配额。
@@ -186,7 +196,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.schedule.on(self.date_rules.month_start(), self.time_rules.at(9, 31), self._monthly_heartbeat)
 
     # ------------------------------------------------------------------
-    def _make_consolidation_handler(self, key):
+    def _make_consolidation_handler(self, key: str):
         def handler(sender, bar):
             if self.atr_ind[key].is_ready:
                 self.atr_window[key].add(self.atr_ind[key].current.value)
@@ -268,7 +278,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     self.trailing_active[key] = False
 
     # ------------------------------------------------------------------
-    def _reset_position_state(self, key):
+    def _reset_position_state(self, key: str) -> None:
         self.position_side[key] = 0
         self.stop_price[key] = None
         self.target_price[key] = None
@@ -287,7 +297,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         return self.session_start_minutes <= minutes <= self.session_end_minutes
 
     # ------------------------------------------------------------------
-    def _has_valid_price(self, symbol):
+    def _has_valid_price(self, symbol) -> bool:
         return (symbol is not None
                 and symbol in self.securities
                 and self.securities[symbol].has_data
@@ -356,7 +366,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             self._rebalance(signals)
 
     # ------------------------------------------------------------------
-    def _get_signal(self, key):
+    def _get_signal(self, key: str) -> int:
         """趋势 + ATR过滤 信号：1做多 -1做空 0不操作"""
         if not (self.ema_fast[key].is_ready and self.ema_slow[key].is_ready
                 and self.atr_ind[key].is_ready and self.adx_ind[key].is_ready):
@@ -436,17 +446,27 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
             quantity = int(risk_dollars_leg / dollar_risk_per_contract)
 
-            # ---- 第二层：保证金硬约束，防止风险预算算出账户扛不住的手数 ----
-            price = self.securities[symbol].price
-            leverage = max(self.securities[symbol].leverage, 1.0)
-            notional_per_contract = price * self.multiplier[key]
-            est_margin_per_contract = notional_per_contract / leverage
+            # ---- 第二层：保证金硬约束（v11修复）----
+            # 期货保证金不是名义价值/leverage。
+            # 使用近似保证金避免MNQ上涨后错误计算为无法交易。
+            est_margin_per_contract = self.futures_margin.get(key, 3000)
 
-            if est_margin_per_contract <= 0:
+            max_affordable = int(
+                (self.portfolio.margin_remaining * self.margin_safety_buffer)
+                / est_margin_per_contract
+            )
+
+            # 诊断quantity被保证金限制的情况
+            if max_affordable < 1:
+                if self.diagnostic_logging:
+                    self.log(
+                        f"[仓位阻断]{self.time.date()} {key} "
+                        f"riskQty={quantity} "
+                        f"marginNeed={est_margin_per_contract} "
+                        f"remaining={self.portfolio.margin_remaining:.0f}"
+                    )
                 continue
 
-            max_affordable = int((self.portfolio.margin_remaining * self.margin_safety_buffer)
-                                  / est_margin_per_contract)
             quantity = min(quantity, max_affordable)
 
             if quantity < 1:
@@ -536,7 +556,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.pending_target_dist[key] = None
 
     # ------------------------------------------------------------------
-    def _check_stop_target(self, key):
+    def _check_stop_target(self, key: str) -> None:
         symbol = self.holding_symbol[key]
         if self.position_side[key] == 0:
             return

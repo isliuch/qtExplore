@@ -166,6 +166,10 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.consecutive_losses = 0                            # 单日连续亏损笔数（所有已启用品种合计）
         self.daily_orders_count = 0                             # 单日订单数（安全阀计数）
 
+        # 实际持有仓位所在的具体合约symbol（区别于mapped_symbol——mapped_symbol每根bar
+        # 都会刷新成"当前"近月合约，展期时会先于我们平仓而变化，不能用来做持仓相关判断）
+        self.holding_symbol = {k: None for k in self.futures}
+
         self.daily_start_equity  = self.portfolio.total_portfolio_value
         self.trading_halted_today = False
 
@@ -208,9 +212,20 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         if self.is_warming_up:
             return
 
-        # 更新映射合约（每次rollover后 mapped 会变化）
+        # 更新映射合约（每次rollover后 mapped 会变化）；如果当前持仓的合约不再是
+        # 最新近月合约，说明发生了展期，主动平掉旧合约，而不是等摘牌被动强平
+        # （被动强平那笔订单用的是旧合约symbol，容易和已经刷新的mapped_symbol对不上，
+        # 导致仓位状态没法正常重置——这正是之前"展期后不再产生新订单"的根因）
         for key, fut in self.futures.items():
-            self.mapped_symbol[key] = fut.mapped
+            new_mapped = fut.mapped
+            old_holding = self.holding_symbol[key]
+            if (self.position_side[key] != 0 and old_holding is not None
+                    and new_mapped is not None and new_mapped != old_holding):
+                if self._has_valid_price(old_holding):
+                    self.liquidate(old_holding)
+                    if self.verbose_logging:
+                        self.log(f"{key} 合约展期，主动平掉旧合约 {old_holding.value}")
+            self.mapped_symbol[key] = new_mapped
 
         # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓（止损止盈仍照常执行）
         if not self.trading_halted_today and self.daily_start_equity > 0:
@@ -277,19 +292,21 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         for key, fut in self.futures.items():
             target_side = signals[key]
-            symbol = self.mapped_symbol[key]
-
-            if not self._has_valid_price(symbol):
-                continue
-
             current_side = self.position_side[key]
 
-            # 信号翻转或归零 -> 先平仓
+            # 信号翻转或归零 -> 平掉当前实际持有的合约（不是"当前近月合约"，
+            # 展期过渡期这两者可能不是同一张合约）
             if target_side != current_side and current_side != 0:
-                self.liquidate(symbol)
+                holding = self.holding_symbol[key]
+                if self._has_valid_price(holding):
+                    self.liquidate(holding)
                 continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
             if target_side == 0 or current_side != 0:
+                continue
+
+            symbol = self.mapped_symbol[key]  # 开新仓永远用当前近月合约
+            if not self._has_valid_price(symbol):
                 continue
 
             # ---- 风控过滤：全局订单数上限 / 单品种次数上限 / 止损冷却期 ----
@@ -357,10 +374,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         if self.verbose_logging:
             self.log(f"成交: {order_event.symbol} {order_event.fill_quantity}@{order_event.fill_price}")
 
-        # 找到这笔成交对应哪个品种
+        # 找到这笔成交对应哪个品种：用canonical symbol匹配，不依赖会随展期变化的
+        # mapped_symbol快照——摘牌强平单用的是旧合约symbol，这时mapped_symbol可能
+        # 已经指向新合约了，用mapped_symbol查找会匹配不到，导致仓位状态卡死不重置
         key = None
-        for k, sym in self.mapped_symbol.items():
-            if sym is not None and sym == order_event.symbol:
+        for k, fut in self.futures.items():
+            if order_event.symbol.canonical == fut.symbol:
                 key = k
                 break
         if key is None:
@@ -370,7 +389,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         net_qty = self.portfolio[order_event.symbol].quantity
 
         if net_qty == 0:
-            # 平仓成交（liquidate对应的Filled事件）-> 结算盈亏，更新风控状态
+            # 平仓成交（liquidate对应的Filled事件，含正常止损止盈/展期主动平仓/摘牌强平）
+            # -> 结算盈亏，更新风控状态
             closed_side = self.position_side[key]
             if self.entry_price[key] is not None and closed_side != 0:
                 pnl_points = (fill_price - self.entry_price[key]) * closed_side
@@ -393,9 +413,10 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             self.entry_price[key] = None
             self.initial_stop_dist[key] = None
             self.trailing_active[key] = False
+            self.holding_symbol[key] = None
             return
 
-        # 开仓成交：只有这时才正式记录持仓方向和止损/止盈价位
+        # 开仓成交：只有这时才正式记录持仓方向、持仓合约和止损/止盈价位
         side = self.pending_side[key]
         stop_dist = self.pending_stop_dist[key]
         target_dist = self.pending_target_dist[key]
@@ -404,6 +425,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             return  # 理论上不该发生，兜底跳过
 
         self.position_side[key] = side
+        self.holding_symbol[key] = order_event.symbol
         self.entry_price[key] = fill_price
         self.initial_stop_dist[key] = stop_dist
         self.trailing_active[key] = False
@@ -421,7 +443,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
     # ------------------------------------------------------------------
     def _check_stop_target(self, key):
-        symbol = self.mapped_symbol[key]
+        symbol = self.holding_symbol[key]
         if self.position_side[key] == 0:
             return
         if not self._has_valid_price(symbol):
@@ -466,7 +488,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
     # ------------------------------------------------------------------
     def flatten_all(self):
         for key, fut in self.futures.items():
-            symbol = self.mapped_symbol[key]
+            symbol = self.holding_symbol[key]
             if symbol is not None and self.portfolio[symbol].invested:
                 self.liquidate(symbol)
                 if self.verbose_logging:

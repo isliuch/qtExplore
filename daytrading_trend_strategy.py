@@ -394,6 +394,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
     # ------------------------------------------------------------------
     def _rebalance(self, signals):
+        # v12: 全链路诊断日志
+        # 用于定位策略“不下单”的具体环节：
+        # signal -> position -> filter -> risk quantity -> margin -> order
+        if self.diagnostic_logging:
+            self.log(f"[REBALANCE开始] {self.time} signals={signals}")
+
         active = {k: v for k, v in signals.items() if v != 0}
 
         inv_atr = {}
@@ -407,6 +413,13 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             target_side = signals[key]
             current_side = self.position_side[key]
 
+            if self.diagnostic_logging:
+                self.log(
+                    f"[状态] {key} signal={target_side} "
+                    f"position={current_side} "
+                    f"mapped={self.mapped_symbol[key]}"
+                )
+
             # 信号翻转或归零 -> 平掉当前实际持有的合约（不是"当前近月合约"，
             # 展期过渡期这两者可能不是同一张合约）
             if target_side != current_side and current_side != 0:
@@ -416,6 +429,9 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
             if target_side == 0 or current_side != 0:
+                if self.diagnostic_logging:
+                    reason = "无信号" if target_side == 0 else "已有持仓"
+                    self.log(f"[跳过]{key} reason={reason}")
                 continue
 
             symbol = self.mapped_symbol[key]  # 开新仓永远用当前近月合约
@@ -446,6 +462,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
             quantity = int(risk_dollars_leg / dollar_risk_per_contract)
 
+            if self.diagnostic_logging:
+                self.log(
+                    f"[风险计算]{key} "
+                    f"equity={equity:.0f} "
+                    f"riskBudget={risk_dollars_leg:.2f} "
+                    f"ATR={atr_val:.2f} "
+                    f"contractRisk={dollar_risk_per_contract:.2f} "
+                    f"rawQty={quantity}"
+                )
+
             # ---- 第二层：保证金硬约束（v11修复）----
             # 期货保证金不是名义价值/leverage。
             # 使用近似保证金避免MNQ上涨后错误计算为无法交易。
@@ -467,15 +493,31 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     )
                 continue
 
+            if self.diagnostic_logging:
+                self.log(
+                    f"[保证金计算]{key} "
+                    f"marginNeed={est_margin_per_contract:.0f} "
+                    f"remaining={self.portfolio.margin_remaining:.0f} "
+                    f"maxQty={max_affordable}"
+                )
+
             quantity = min(quantity, max_affordable)
 
             if quantity < 1:
+                if self.diagnostic_logging:
+                    self.log(f"[最终阻断]{key} quantity={quantity}")
                 continue
 
             # 记录待成交方向和止损/止盈距离，实际价位等 on_order_event 里成交后再算
             self.pending_side[key] = target_side
             self.pending_stop_dist[key] = stop_distance_points
             self.pending_target_dist[key] = target_distance_points
+
+            if self.diagnostic_logging:
+                self.log(
+                    f"[提交订单]{key} symbol={symbol} "
+                    f"side={target_side} quantity={quantity}"
+                )
 
             if target_side == 1:
                 self.market_order(symbol, quantity)

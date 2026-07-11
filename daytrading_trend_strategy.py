@@ -205,6 +205,31 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.log(f"[心跳]{self.time.date()} 总成交={self.trade_count} "
                  f"权益={self.portfolio.total_portfolio_value:.0f} halt={self.trading_halted_today} {status}")
 
+        # 信号诊断：显示每个品种的指标就绪状态和信号被阻塞的原因
+        for k in self.futures:
+            ema_ready = self.ema_fast[k].is_ready and self.ema_slow[k].is_ready
+            atr_ready = self.atr_ind[k].is_ready
+            adx_ready = self.adx_ind[k].is_ready
+            win_count = self.atr_window[k].count
+            atr_val = self.atr_ind[k].current.value if atr_ready else 0
+            adx_val = self.adx_ind[k].current.value if adx_ready else 0
+            fast_val = self.ema_fast[k].current.value if self.ema_fast[k].is_ready else 0
+            slow_val = self.ema_slow[k].current.value if self.ema_slow[k].is_ready else 0
+
+            # 计算ATR排名
+            atr_rank = -1
+            if win_count >= self.atr_lookback and atr_ready:
+                atr_values = sorted(self.atr_window[k])
+                current_atr = self.atr_ind[k].current.value
+                atr_rank = sum(1 for v in atr_values if v <= current_atr) / len(atr_values)
+
+            sig = self._get_signal(k)
+            self.log(f"[信号诊断]{self.time.date()} {k} sig={sig} "
+                     f"ema_rdy={ema_ready} atr_rdy={atr_ready} adx_rdy={adx_ready} "
+                     f"win={win_count}/{self.atr_lookback} "
+                     f"atr={atr_val:.2f} rank={atr_rank:.2f} adx={adx_val:.1f} "
+                     f"fast={fast_val:.1f} slow={slow_val:.1f}")
+
     # ------------------------------------------------------------------
     def reset_daily_state(self):
         self.daily_start_equity = self.portfolio.total_portfolio_value

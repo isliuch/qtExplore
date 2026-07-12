@@ -108,7 +108,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 0 = 关闭
         # 1 = 仅交易级日志
         # 2 = 完整链路日志
-        self.debug_level = 2
+        self.debug_level = 1
         self.diagnostic_logging = self.debug_level > 0
         self.trade_count = 0
 
@@ -437,7 +437,10 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # v12: 全链路诊断日志
         # 用于定位策略“不下单”的具体环节：
         # signal -> position -> filter -> risk quantity -> margin -> order
-        if self.diagnostic_logging:
+        # 注意：这行每根1分钟bar在session内都会执行一次（一天390次），只挂在
+        # debug_level>=2上，debug_level=1时只保留月度心跳这类低频信息，
+        # 否则多年回测几小时内日志配额就会被打满
+        if self.debug_level >= 2:
             self.log(f"[REBALANCE开始] {self.time} signals={signals}")
 
         active = {k: v for k, v in signals.items() if v != 0}
@@ -472,7 +475,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
             if target_side == 0 or current_side != 0:
-                if self.diagnostic_logging:
+                if self.debug_level >= 2:
                     reason = "无信号" if target_side == 0 else "已有持仓"
                     self.log(f"[跳过]{key} reason={reason}")
                 continue
@@ -711,36 +714,19 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 这样即使全程静默也能知道策略到底交易了多少次
         self.log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.portfolio.total_portfolio_value:.2f}")
 
-    def _strategy_snapshot(self):
-        """
-        v13每日状态快照，方便定位长期停止交易。
-        """
-        if getattr(self, "debug_level", 0) >= 1:
-            self._debug_log(
-                1,
-                f"[状态快照] {self.Time.date()} "
-                f"equity={self.Portfolio.TotalPortfolioValue:.2f} "
-                f"cash={self.Portfolio.Cash:.2f} "
-                f"margin={self.Portfolio.MarginRemaining:.2f}"
-            )
-
-    def on_symbol_changed_events(self, events):
-
-        for e in events:
-            self.Log(
-                f"[Mapping变化]"
-                f"{e.Symbol}"
-                f" -> "
-                f"{e.NewSymbol} "
-                f"newInSecurities={e.NewSymbol in self.Securities}" # 检查新合约是否在Securities
-            )
-
-            if e.NewSymbol in self.Securities:
-                security = self.Securities[e.NewSymbol]
-
-                self.Log(
-                    f"[新合约状态] "
-                    f"{e.NewSymbol} "
-                    f"price={security.Price} "
-                    f"hasData={security.HasData}"
-                )
+    def on_symbol_changed_events(self, symbol_changed_events):
+        # 引擎自动回调：合约展期导致symbol映射变化时触发。纯诊断用途，
+        # 用try/except兜底——哪怕这里面的字段名猜错了，也绝不能让诊断代码
+        # 本身把整个回测打断（之前已经在TradeBarConsolidator上吃过一次类似的亏）。
+        if not self.diagnostic_logging:
+            return
+        try:
+            for changed_event in symbol_changed_events.values():
+                old_symbol = changed_event.old_symbol
+                new_symbol = changed_event.new_symbol
+                self.log(f"[Mapping变化] {old_symbol} -> {new_symbol}")
+                if new_symbol in self.securities:
+                    security = self.securities[new_symbol]
+                    self.log(f"[新合约状态] {new_symbol} price={security.price} has_data={security.has_data}")
+        except Exception as ex:
+            self.log(f"[Mapping变化-诊断异常] {ex}")

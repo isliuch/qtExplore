@@ -1,10 +1,18 @@
 # region imports
 from AlgorithmImports import *
+import diagnostics
+import risk_management
 # endregion
 
 class ATRTrendRiskParityMNQMES(QCAlgorithm):
     """
     日内趋势跟踪策略：MNQ (Micro E-mini Nasdaq-100) + MES (Micro E-mini S&P 500)
+
+    代码拆成了3个文件（QuantConnect免费账户单文件上限32KB，单文件版本超限）：
+      - main.py            引擎入口：initialize / on_data / on_order_event 等
+      - diagnostics.py     诊断/日志相关方法（DiagnosticsMixin）
+      - risk_management.py 风控/仓位管理/信号计算（RiskManagementMixin）
+    三个文件里的方法通过mixin组合进同一个类，共享同一个self，逻辑和单文件版本完全一致。
 
     v3：全面改用 QuantConnect 新版 Python API 命名规范（PEP8 下划线风格）。
     旧版 Pascal 命名（SetStartDate / AddFuture / Resolution.Minute 等）在当前
@@ -34,9 +42,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
     运行只交易哪几个品种。风险平价的权重分配、订单数/连续亏损等风控计数，
     都只会覆盖开关打开的品种，关闭的品种不订阅数据、不占用任何风险预算。
 
+    v11：期货保证金不能用 price*multiplier/leverage 估算——QC某些期货对象
+    的leverage会返回1，导致把期货当股票全额占用资金，MNQ上涨后quantity算
+    出来是0，永久没有订单。改用近似SPAN保证金硬编码表(futures_margin)。
+
+    v13：加入分级调试框架(debug_level 0/1/2) + 异常日志(_log_anomaly，不受
+    debug_level限制但每个日志来源有独立上限，避免10KB/次的日志配额被打满)。
+
     使用前请确认：
       - 账户/回测环境已开通期货数据权限（CME 期货数据在 QC 云端为付费订阅）
-      - 保证金估算用 Leverage 做近似，不是精确的期货SPAN保证金
+      - 保证金估算用futures_margin近似值，不是精确的期货SPAN保证金
       - 所有参数都需要样本内/样本外回测调优
     """
 
@@ -76,7 +91,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         # ------------------ 品种开关：控制本次运行交易哪些品种 ------------------
         self.trade_mnq = True   # Micro E-mini Nasdaq-100
-        self.trade_mes = False   # Micro E-mini S&P 500
+        self.trade_mes = False  # Micro E-mini S&P 500
         self.trade_mym = False  # Micro E-mini Dow Jones（默认关闭，需要时改成True）
 
         # 每点价值（多加品种时在这里补充 ticker -> 点值 和 开关）
@@ -102,7 +117,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.verbose_logging = False
 
         # 诊断日志：不像verbose_logging那样逐笔记录（配额扛不住完整多年回测），
-        # 只记录展期/状态自愈这类关键事件 + 每月一条心跳（成交笔数、当前持仓状态摘要），
+        # 只记录展期/状态自愈这类关键事件 + 每季度一条心跳（成交笔数、当前持仓状态摘要），
         # 用很小的日志量就能覆盖完整回测区间，方便定位"到底是哪个月开始不交易了"
         # v13 调试框架：
         # 0 = 关闭
@@ -111,6 +126,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.debug_level = 1
         self.diagnostic_logging = self.debug_level > 0
         self.trade_count = 0
+
+        # 异常/关键事件日志：不受debug_level限制，出问题时始终会打印，
+        # 但每个日志来源(site)单独计数，达到各自上限后自动停止，避免某一处
+        # 高频异常把10KB/次的日志配额全部吃光（见diagnostics.py的_log_anomaly方法）
+        self._log_site_counts = {}
 
         # 交易时段（美东时间），避开开盘头几分钟噪音，收盘前留出平仓缓冲
         self.session_start_minutes = 9 * 60 + 35
@@ -156,8 +176,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
             self.ema_fast[key]   = ExponentialMovingAverage(self.fast_period)
             self.ema_slow[key]   = ExponentialMovingAverage(self.slow_period)
-            self.atr_ind[key]        = AverageTrueRange(self.atr_period, MovingAverageType.WILDERS)
-            self.adx_ind[key]        = AverageDirectionalIndex(self.adx_period)
+            self.atr_ind[key]    = AverageTrueRange(self.atr_period, MovingAverageType.WILDERS)
+            self.adx_ind[key]    = AverageDirectionalIndex(self.adx_period)
             self.atr_window[key] = RollingWindow[float](self.atr_lookback)
 
             consolidator = TradeBarConsolidator(timedelta(minutes=5))
@@ -201,118 +221,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         self.set_warm_up(timedelta(days=15))
 
-        # ------------------ 日程：重置日内状态 / 收盘前强制平仓 / 每月心跳 ------------------
+        # ------------------ 日程：重置日内状态 / 收盘前强制平仓 / 季度心跳 ------------------
         self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 30), self.reset_daily_state)
         self.schedule.on(self.date_rules.every_day(), self.time_rules.at(15, 45), self.flatten_all)
+        # date_rules没有内置"每季度"规则，这里还是按月触发调度，具体的季度过滤
+        # 逻辑写在_monthly_heartbeat内部（只在1/4/7/10月才真正打印）
         self.schedule.on(self.date_rules.month_start(), self.time_rules.at(9, 31), self._monthly_heartbeat)
-
-    # ------------------------------------------------------------------
-    def _make_consolidation_handler(self, key: str):
-        def handler(sender, bar):
-            if self.atr_ind[key].is_ready:
-                self.atr_window[key].add(self.atr_ind[key].current.value)
-        return handler
-
-    # ------------------------------------------------------------------
-    def _monthly_heartbeat(self):
-        if not self.diagnostic_logging:
-            return
-        status = " ".join(
-            f"{k}[side={self.position_side[k]},hold={'Y' if self.holding_symbol[k] else 'N'},"
-            f"mapped={'Y' if self.mapped_symbol.get(k) else 'N'},"
-            f"cd={'Y' if (self.cooldown_until[k] is not None and self.time < self.cooldown_until[k]) else 'N'}]"
-            for k in self.futures
-        )
-        self.log(f"[心跳]{self.time.date()} 总成交={self.trade_count} "
-                 f"权益={self.portfolio.total_portfolio_value:.0f} halt={self.trading_halted_today} {status}")
-
-        # 信号诊断：显示每个品种的指标就绪状态和信号被阻塞的原因
-        for k in self.futures:
-            ema_ready = self.ema_fast[k].is_ready and self.ema_slow[k].is_ready
-            atr_ready = self.atr_ind[k].is_ready
-            adx_ready = self.adx_ind[k].is_ready
-            win_count = self.atr_window[k].count
-            atr_val = self.atr_ind[k].current.value if atr_ready else 0
-            adx_val = self.adx_ind[k].current.value if adx_ready else 0
-            fast_val = self.ema_fast[k].current.value if self.ema_fast[k].is_ready else 0
-            slow_val = self.ema_slow[k].current.value if self.ema_slow[k].is_ready else 0
-
-            # 计算ATR排名
-            atr_rank = -1
-            if win_count >= self.atr_lookback and atr_ready:
-                atr_values = sorted(self.atr_window[k])
-                current_atr = self.atr_ind[k].current.value
-                atr_rank = sum(1 for v in atr_values if v <= current_atr) / len(atr_values)
-
-            sig = self._get_signal(k)
-            self.log(f"[信号诊断]{self.time.date()} {k} sig={sig} "
-                     f"ema_rdy={ema_ready} atr_rdy={atr_ready} adx_rdy={adx_ready} "
-                     f"win={win_count}/{self.atr_lookback} "
-                     f"atr={atr_val:.2f} rank={atr_rank:.2f} adx={adx_val:.1f} "
-                     f"fast={fast_val:.1f} slow={slow_val:.1f}")
-
-    # ------------------------------------------------------------------
-    def reset_daily_state(self):
-        self.daily_start_equity = self.portfolio.total_portfolio_value
-        self.trading_halted_today = False
-        self.trades_today = {k: 0 for k in self.futures}
-        self.consecutive_losses = 0
-        self.daily_orders_count = 0
-
-    # ------------------------------------------------------------------
-    def _reconcile_state(self):
-        for key, fut in self.futures.items():
-            holding = self.holding_symbol[key]
-            actually_invested = holding is not None and holding in self.portfolio and self.portfolio[holding].invested
-
-            if self.position_side[key] != 0 and not actually_invested:
-                # 我们以为有仓位，但账户实际没有 -> 大概率是某笔平仓成交没被正确
-                # 记账（比如强平/订单竞争），按实际情况纠正为空仓，避免永久卡死
-                if self.verbose_logging or self.diagnostic_logging:
-                    self.log(f"[自愈]{self.time.date()} {key} 记账认为持仓,实际空仓,重置为空仓")
-                self._reset_position_state(key)
-
-            elif self.position_side[key] == 0 and holding is not None and holding in self.portfolio and self.portfolio[holding].invested:
-                # 反过来：账户实际有仓位，但我们以为是空仓 -> 同样按实际持仓纠正，
-                # 用当前市价当作入场价的保守估计（无法还原真实入场价，只能这样兜底）
-                actual_qty = self.portfolio[holding].quantity
-                if actual_qty != 0:
-                    if self.verbose_logging or self.diagnostic_logging:
-                        self.log(f"[自愈]{self.time.date()} {key} 记账认为空仓,实际持仓,按实际纠正")
-                    self.position_side[key] = 1 if actual_qty > 0 else -1
-                    self.holding_symbol[key] = holding
-                    self.entry_price[key] = self.portfolio[holding].average_price
-                    atr_val = self.atr_ind[key].current.value if self.atr_ind[key].is_ready else None
-                    self.initial_stop_dist[key] = atr_val * self.atr_stop_mult if atr_val else None
-                    self.stop_price[key] = None
-                    self.target_price[key] = None
-                    self.trailing_active[key] = False
-
-    # ------------------------------------------------------------------
-    def _reset_position_state(self, key: str) -> None:
-        self.position_side[key] = 0
-        self.stop_price[key] = None
-        self.target_price[key] = None
-        self.pending_side[key] = 0
-        self.pending_stop_dist[key] = None
-        self.pending_target_dist[key] = None
-        self.entry_price[key] = None
-        self.initial_stop_dist[key] = None
-        self.trailing_active[key] = False
-        self.holding_symbol[key] = None
-
-    # ------------------------------------------------------------------
-    def _in_session(self):
-        t = self.time
-        minutes = t.hour * 60 + t.minute
-        return self.session_start_minutes <= minutes <= self.session_end_minutes
-
-    # ------------------------------------------------------------------
-    def _has_valid_price(self, symbol) -> bool:
-        return (symbol is not None
-                and symbol in self.securities
-                and self.securities[symbol].has_data
-                and self.securities[symbol].price > 0)
 
     # ------------------------------------------------------------------
     def on_data(self, slice):
@@ -338,7 +252,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     f"on_data [Mapped检查] {self.time} "
                     f"{key} "
                     f"mapped={new_mapped} "
-                    f"inSecurities={new_mapped in self.Securities if new_mapped else False}"
+                    f"inSecurities={new_mapped in self.securities if new_mapped else False}"
                 )
 
             if new_mapped:
@@ -350,24 +264,24 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     f"{new_mapped} "
                     f"expiry={contract.symbol.id}"
                 )
-    
+
             old_holding = self.holding_symbol[key]
 
             # 诊断：mapped合约变成None，说明展期机制没能解析出下一张可交易合约，
             # 后续所有开仓都会被_has_valid_price挡住——只在状态刚变化时记一次，避免刷屏
             if new_mapped is None and self.mapped_symbol.get(key) is not None:
-                if self.verbose_logging or self.diagnostic_logging:
-                    self.log(f"[警告]{self.time.date()} {key} mapped合约变为None，展期解析失败")
+                self._log_anomaly(f"mapped_none_{key}",
+                    f"[警告]{self.time.date()} {key} mapped合约变为None，展期解析失败")
             elif new_mapped is not None and self.mapped_symbol.get(key) is None and self.mapped_symbol.get(key) != new_mapped:
-                if self.verbose_logging or self.diagnostic_logging:
-                    self.log(f"[恢复]{self.time.date()} {key} mapped合约恢复为 {new_mapped.value}")
+                self._log_anomaly(f"mapped_recover_{key}",
+                    f"[恢复]{self.time.date()} {key} mapped合约恢复为 {new_mapped.value}")
 
             if (self.position_side[key] != 0 and old_holding is not None
                     and new_mapped is not None and new_mapped != old_holding):
                 if self._has_valid_price(old_holding):
                     self.liquidate(old_holding)
-                    if self.verbose_logging or self.diagnostic_logging:
-                        self.log(f"[展期]{self.time.date()} {key} 平掉旧合约 {old_holding.value}")
+                    self._log_anomaly(f"roll_{key}",
+                        f"[展期]{self.time.date()} {key} 平掉旧合约 {old_holding.value}", max_count=30)
             self.mapped_symbol[key] = new_mapped
 
         # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓（止损止盈仍照常执行）
@@ -375,12 +289,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             dd = (self.portfolio.total_portfolio_value - self.daily_start_equity) / self.daily_start_equity
             if dd <= -self.daily_loss_limit:
                 self.trading_halted_today = True
-                if self.verbose_logging:
-                    self.log(f"触发单日亏损限制 {dd:.2%}，今日停止开新仓")
+                self._log_anomaly("daily_loss_halt",
+                    f"[日亏损熔断]{self.time.date()} 触发单日亏损限制 {dd:.2%}，今日停止开新仓")
             elif self.daily_profit_target is not None and dd >= self.daily_profit_target:
                 self.trading_halted_today = True
-                if self.verbose_logging:
-                    self.log(f"达到单日盈利目标 {dd:.2%}，今日停止开新仓，锁定利润")
+                self._log_anomaly("daily_profit_halt",
+                    f"[日盈利锁定]{self.time.date()} 达到单日盈利目标 {dd:.2%}，今日停止开新仓")
 
         # 止损止盈检查，任何时段都执行，保护已有持仓
         for key in self.futures:
@@ -394,198 +308,6 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         if not self.trading_halted_today:
             self._rebalance(signals)
-
-    # ------------------------------------------------------------------
-    def _get_signal(self, key: str) -> int:
-        """趋势 + ATR过滤 信号：1做多 -1做空 0不操作"""
-        if not (self.ema_fast[key].is_ready and self.ema_slow[key].is_ready
-                and self.atr_ind[key].is_ready and self.adx_ind[key].is_ready):
-            return 0
-        if self.atr_window[key].count < self.atr_lookback:
-            return 0
-
-        atr_values = sorted(self.atr_window[key])
-        current_atr = self.atr_ind[key].current.value
-        rank = sum(1 for v in atr_values if v <= current_atr) / len(atr_values)
-        if rank < self.atr_low_pct or rank > self.atr_high_pct:
-            return 0
-
-        if self.adx_ind[key].current.value < self.adx_threshold:
-            return 0
-
-        fast = self.ema_fast[key].current.value
-        slow = self.ema_slow[key].current.value
-
-        if fast > slow:
-            return 1
-        elif fast < slow:
-            return -1
-        return 0
-
-    # ------------------------------------------------------------------
-    def _debug_log(self, level: int, message: str) -> None:
-        """
-        v13统一调试日志入口。
-        level:
-        1 - 交易级
-        2 - 完整诊断
-        """
-        if getattr(self, "debug_level", 0) >= level:
-            self.log(message)
-
-    def _rebalance(self, signals):
-        # v12: 全链路诊断日志
-        # 用于定位策略“不下单”的具体环节：
-        # signal -> position -> filter -> risk quantity -> margin -> order
-        # 注意：这行每根1分钟bar在session内都会执行一次（一天390次），只挂在
-        # debug_level>=2上，debug_level=1时只保留月度心跳这类低频信息，
-        # 否则多年回测几小时内日志配额就会被打满
-        if self.debug_level >= 2:
-            self.log(f"[REBALANCE开始] {self.time} signals={signals}")
-
-        active = {k: v for k, v in signals.items() if v != 0}
-
-        inv_atr = {}
-        for key in self.futures:
-            if self.atr_ind[key].is_ready and self.atr_ind[key].current.value > 0:
-                inv_atr[key] = 1.0 / self.atr_ind[key].current.value
-
-        total_inv_atr = sum(inv_atr.get(k, 0) for k in active) if active else 0
-
-        for key, fut in self.futures.items():
-            target_side = signals[key]
-            current_side = self.position_side[key]
-
-            if self.debug_level >= 2:
-                mapped = self.mapped_symbol[key]
-
-                self._debug_log(2,
-                    f"[状态] {key} signal={target_side} "
-                    f"position={current_side} "
-                    f"mapped={mapped} "
-                    f"inSecurities={mapped in self.Securities}"
-                )
-
-            # 信号翻转或归零 -> 平掉当前实际持有的合约（不是"当前近月合约"，
-            # 展期过渡期这两者可能不是同一张合约）
-            if target_side != current_side and current_side != 0:
-                holding = self.holding_symbol[key]
-                if self._has_valid_price(holding):
-                    self.liquidate(holding)
-                continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
-
-            if target_side == 0 or current_side != 0:
-                if self.debug_level >= 2:
-                    reason = "无信号" if target_side == 0 else "已有持仓"
-                    self.log(f"[跳过]{key} reason={reason}")
-                continue
-
-            symbol = self.mapped_symbol[key]  # 开新仓永远用当前近月合约
-
-
-            # v13.1: 展期后合约订阅状态检查
-            if self.debug_level >= 2:
-                self._debug_log(
-                    2,
-                    f"[交易检查]{key} "
-                    f"symbol={symbol} "
-                    f"inSecurities={symbol in self.Securities} "
-                    f"mapped={self.mapped_symbol[key]}"
-                )
-
-            if not self._has_valid_price(symbol):
-                continue
-
-            # ---- 风控过滤：全局订单数上限 / 单品种次数上限 / 止损冷却期 ----
-            if self.daily_orders_count >= self.max_daily_orders:
-                continue
-            if self.trades_today[key] >= self.max_trades_per_symbol_per_day:
-                continue
-            if self.cooldown_until[key] is not None and self.time < self.cooldown_until[key]:
-                continue
-
-            # ---- 风险平价手数（第一层：按ATR止损风险预算）----
-            equity = self.portfolio.total_portfolio_value
-            risk_dollars_total = equity * self.total_risk_budget
-            weight = inv_atr[key] / total_inv_atr if total_inv_atr > 0 else 0
-            risk_dollars_leg = risk_dollars_total * weight
-
-            atr_val = self.atr_ind[key].current.value
-            stop_distance_points = atr_val * self.atr_stop_mult
-            target_distance_points = atr_val * self.atr_target_mult
-            dollar_risk_per_contract = stop_distance_points * self.multiplier[key]
-
-            if dollar_risk_per_contract <= 0:
-                continue
-
-            quantity = int(risk_dollars_leg / dollar_risk_per_contract)
-
-            if self.debug_level >= 2:
-                self._debug_log(2,
-                    f"[风险计算]{key} "
-                    f"equity={equity:.0f} "
-                    f"riskBudget={risk_dollars_leg:.2f} "
-                    f"ATR={atr_val:.2f} "
-                    f"contractRisk={dollar_risk_per_contract:.2f} "
-                    f"rawQty={quantity}"
-                )
-
-            # ---- 第二层：保证金硬约束（v11修复）----
-            # 期货保证金不是名义价值/leverage。
-            # 使用近似保证金避免MNQ上涨后错误计算为无法交易。
-            est_margin_per_contract = self.futures_margin.get(key, 3000)
-
-            max_affordable = int(
-                (self.portfolio.margin_remaining * self.margin_safety_buffer)
-                / est_margin_per_contract
-            )
-
-            # 诊断quantity被保证金限制的情况
-            if max_affordable < 1:
-                if self.debug_level >= 2:
-                    self._debug_log(2,
-                        f"[仓位阻断]{self.time.date()} {key} "
-                        f"riskQty={quantity} "
-                        f"marginNeed={est_margin_per_contract} "
-                        f"remaining={self.portfolio.margin_remaining:.0f}"
-                    )
-                continue
-
-            if self.debug_level >= 2:
-                self._debug_log(2,
-                    f"[保证金计算]{key} "
-                    f"marginNeed={est_margin_per_contract:.0f} "
-                    f"remaining={self.portfolio.margin_remaining:.0f} "
-                    f"maxQty={max_affordable}"
-                )
-
-            quantity = min(quantity, max_affordable)
-
-            if quantity < 1:
-                if self.debug_level >= 2:
-                    self._debug_log(2,f"[最终阻断]{key} quantity={quantity}")
-                continue
-
-            # 记录待成交方向和止损/止盈距离，实际价位等 on_order_event 里成交后再算
-            self.pending_side[key] = target_side
-            self.pending_stop_dist[key] = stop_distance_points
-            self.pending_target_dist[key] = target_distance_points
-
-            if self.debug_level >= 2:
-                self._debug_log(2,
-                    f"[提交订单]{key} symbol={symbol} "
-                    f"side={target_side} quantity={quantity}"
-                )
-
-            if target_side == 1:
-                self.market_order(symbol, quantity)
-            else:
-                self.market_order(symbol, -quantity)
-
-            if self.verbose_logging:
-                self.log(f"{key} 提交开仓 side={target_side} qty={quantity} "
-                         f"权重={weight:.2%} ATR={atr_val:.2f} "
-                         f"预估保证金/手={est_margin_per_contract:.0f} 剩余保证金={self.portfolio.margin_remaining:.0f}")
 
     # ------------------------------------------------------------------
     def on_order_event(self, order_event):
@@ -622,8 +344,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     self.cooldown_until[key] = self.time + timedelta(minutes=self.loss_cooldown_minutes)
                     if self.consecutive_losses >= self.max_consecutive_losses:
                         self.trading_halted_today = True
-                        if self.verbose_logging:
-                            self.log(f"单日连续亏损达到{self.consecutive_losses}笔，今日停止开新仓")
+                        self._log_anomaly("consecutive_loss_halt",
+                            f"[连续亏损熔断]{self.time.date()} {key} 单日连续亏损达到{self.consecutive_losses}笔，今日停止开新仓")
                 else:
                     self.consecutive_losses = 0
 
@@ -656,71 +378,22 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.pending_target_dist[key] = None
 
     # ------------------------------------------------------------------
-    def _check_stop_target(self, key: str) -> None:
-        symbol = self.holding_symbol[key]
-        if self.position_side[key] == 0:
-            return
-        if not self._has_valid_price(symbol):
-            return
-
-        price = self.securities[symbol].price
-        side = self.position_side[key]
-
-        # ---- 移动止损：浮盈达到 trailing_activation_r 倍初始止损距离后启动 ----
-        if (self.entry_price[key] is not None and self.initial_stop_dist[key]
-                and self.initial_stop_dist[key] > 0):
-            favorable_move = (price - self.entry_price[key]) * side
-            if not self.trailing_active[key] and favorable_move >= self.initial_stop_dist[key] * self.trailing_activation_r:
-                self.trailing_active[key] = True
-                self.target_price[key] = None  # 启动移动止损后不再用固定止盈，让利润奔跑
-
-            if self.trailing_active[key]:
-                atr_val = (self.atr_ind[key].current.value if self.atr_ind[key].is_ready
-                           else self.initial_stop_dist[key] / self.atr_stop_mult)
-                trail_dist = atr_val * self.trailing_atr_mult
-                if side == 1:
-                    new_stop = price - trail_dist
-                    if self.stop_price[key] is None or new_stop > self.stop_price[key]:
-                        self.stop_price[key] = new_stop
-                else:
-                    new_stop = price + trail_dist
-                    if self.stop_price[key] is None or new_stop < self.stop_price[key]:
-                        self.stop_price[key] = new_stop
-
-        stop = self.stop_price[key]
-        target = self.target_price[key]
-
-        hit_stop = stop is not None and ((side == 1 and price <= stop) or (side == -1 and price >= stop))
-        hit_target = target is not None and ((side == 1 and price >= target) or (side == -1 and price <= target))
-
-        if hit_stop or hit_target:
-            self.liquidate(symbol)
-            if self.verbose_logging:
-                reason = "止损" if hit_stop else "止盈"
-                self.log(f"{key} 提交{reason}平仓 @ {price:.2f}")
-
-    # ------------------------------------------------------------------
-    def flatten_all(self):
-        for key, fut in self.futures.items():
-            symbol = self.holding_symbol[key]
-            if symbol is not None and self.portfolio[symbol].invested:
-                self.liquidate(symbol)
-                if self.verbose_logging:
-                    self.log(f"{key} 收盘前强制平仓")
-
-    # ------------------------------------------------------------------
     def on_end_of_algorithm(self):
         # 只在回测结束时打一条汇总日志，不管verbose_logging开关都保留，
         # 这样即使全程静默也能知道策略到底交易了多少次
         self.log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.portfolio.total_portfolio_value:.2f}")
 
+    # ------------------------------------------------------------------
     def on_symbol_changed_events(self, symbol_changed_events):
         # 引擎自动回调：合约展期导致symbol映射变化时触发。纯诊断用途，
         # 用try/except兜底——哪怕这里面的字段名猜错了，也绝不能让诊断代码
         # 本身把整个回测打断（之前已经在TradeBarConsolidator上吃过一次类似的亏）。
-        if not self.diagnostic_logging:
-            return
+        # 注意：except分支始终会打印（不受diagnostic_logging限制），因为
+        # "这段诊断代码本身出异常了"这件事必须始终可见，只是用_log_anomaly
+        # 控制总条数，避免万一每次展期都异常导致刷屏。
         try:
+            if not self.diagnostic_logging:
+                return
             for changed_event in symbol_changed_events.values():
                 old_symbol = changed_event.old_symbol
                 new_symbol = changed_event.new_symbol
@@ -729,4 +402,26 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     security = self.securities[new_symbol]
                     self.log(f"[新合约状态] {new_symbol} price={security.price} has_data={security.has_data}")
         except Exception as ex:
-            self.log(f"[Mapping变化-诊断异常] {ex}")
+            self._log_anomaly("symbol_changed_exception", f"[Mapping变化-诊断异常] {self.time} {ex}", max_count=10)
+
+
+# ------------------------------------------------------------------
+# QCAlgorithm 是托管类（.NET/pythonnet），Python的多重继承在托管类上不支持
+# （报错 "cannot use multiple inheritance with managed classes"），所以不能用
+# mixin继承的方式拆分代码。改成：diagnostics.py / risk_management.py 里写成
+# 普通的模块级函数（显式带self参数），这里用赋值的方式把它们挂到类上变成方法。
+# 效果和mixin继承完全一样，只是绕开了QC这个平台限制。
+ATRTrendRiskParityMNQMES._make_consolidation_handler = diagnostics._make_consolidation_handler
+ATRTrendRiskParityMNQMES._log_anomaly = diagnostics._log_anomaly
+ATRTrendRiskParityMNQMES._debug_log = diagnostics._debug_log
+ATRTrendRiskParityMNQMES._monthly_heartbeat = diagnostics._monthly_heartbeat
+
+ATRTrendRiskParityMNQMES.reset_daily_state = risk_management.reset_daily_state
+ATRTrendRiskParityMNQMES._reconcile_state = risk_management._reconcile_state
+ATRTrendRiskParityMNQMES._reset_position_state = risk_management._reset_position_state
+ATRTrendRiskParityMNQMES._in_session = risk_management._in_session
+ATRTrendRiskParityMNQMES._has_valid_price = risk_management._has_valid_price
+ATRTrendRiskParityMNQMES._get_signal = risk_management._get_signal
+ATRTrendRiskParityMNQMES._rebalance = risk_management._rebalance
+ATRTrendRiskParityMNQMES._check_stop_target = risk_management._check_stop_target
+ATRTrendRiskParityMNQMES.flatten_all = risk_management.flatten_all

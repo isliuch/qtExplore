@@ -134,8 +134,14 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         if len(self.futures) == 0:
             raise Exception("至少需要打开一个品种的交易开关（trade_mnq / trade_mes / trade_mym）")
 
-        for fut in self.futures.values():
+        for key, fut in self.futures.items():
             fut.set_filter(0, 90)  # 只考虑90天内到期的近月合约
+
+            if self.debug_level >= 2:
+                self.log(
+                    f"[Future Filter] {key} "
+                    f"filter=0~90 days"
+                )
 
         # ------------------ 指标：挂在5分钟Consolidator上，减少信号噪音 ------------------
         self.ema_fast   = {}
@@ -326,6 +332,25 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 导致仓位状态没法正常重置——这正是之前"展期后不再产生新订单"的根因）
         for key, fut in self.futures.items():
             new_mapped = fut.mapped
+            if self.debug_level >= 2:
+                self._debug_log(
+                    2,
+                    f"on_data [Mapped检查] {self.time} "
+                    f"{key} "
+                    f"mapped={new_mapped} "
+                    f"inSecurities={new_mapped in self.Securities if new_mapped else False}"
+                )
+
+            if new_mapped:
+                contract = self.securities[new_mapped]
+                self._debug_log(
+                    2,
+                    f"[Mapped Contract]"
+                    f"{key} "
+                    f"{new_mapped} "
+                    f"expiry={contract.symbol.id}"
+                )
+    
             old_holding = self.holding_symbol[key]
 
             # 诊断：mapped合约变成None，说明展期机制没能解析出下一张可交易合约，
@@ -429,10 +454,13 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             current_side = self.position_side[key]
 
             if self.debug_level >= 2:
+                mapped = self.mapped_symbol[key]
+
                 self._debug_log(2,
                     f"[状态] {key} signal={target_side} "
                     f"position={current_side} "
-                    f"mapped={self.mapped_symbol[key]}"
+                    f"mapped={mapped} "
+                    f"inSecurities={mapped in self.Securities}"
                 )
 
             # 信号翻转或归零 -> 平掉当前实际持有的合约（不是"当前近月合约"，
@@ -450,6 +478,18 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 continue
 
             symbol = self.mapped_symbol[key]  # 开新仓永远用当前近月合约
+
+
+            # v13.1: 展期后合约订阅状态检查
+            if self.debug_level >= 2:
+                self._debug_log(
+                    2,
+                    f"[交易检查]{key} "
+                    f"symbol={symbol} "
+                    f"inSecurities={symbol in self.Securities} "
+                    f"mapped={self.mapped_symbol[key]}"
+                )
+
             if not self._has_valid_price(symbol):
                 continue
 
@@ -683,3 +723,24 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 f"cash={self.Portfolio.Cash:.2f} "
                 f"margin={self.Portfolio.MarginRemaining:.2f}"
             )
+
+    def on_symbol_changed_events(self, events):
+
+        for e in events:
+            self.Log(
+                f"[Mapping变化]"
+                f"{e.Symbol}"
+                f" -> "
+                f"{e.NewSymbol} "
+                f"newInSecurities={e.NewSymbol in self.Securities}" # 检查新合约是否在Securities
+            )
+
+            if e.NewSymbol in self.Securities:
+                security = self.Securities[e.NewSymbol]
+
+                self.Log(
+                    f"[新合约状态] "
+                    f"{e.NewSymbol} "
+                    f"price={security.Price} "
+                    f"hasData={security.HasData}"
+                )

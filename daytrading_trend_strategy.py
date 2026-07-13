@@ -247,29 +247,37 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         for symbol, info in list(self.pending_rollover_symbols.items()):
             in_securities = symbol in self.securities
-            #这里故意用 has_data，而不是 _has_valid_price()；你的目标是测量“何时有数据”，价格是否大于零是下一层的可交易性检查。
             has_data = in_securities and self.securities[symbol].has_data
             price = self.securities[symbol].price if in_securities else None
+            is_extended_open = (
+                self.securities[symbol].exchange.hours.is_open(
+                    self.time, extended_market_hours=True
+                )
+                if in_securities else None
+            )
 
             if has_data:
                 delay = self.time - info["start_time"]
                 self._log_anomaly(
-                    "Rollover_Recovered",
+                    f"Rollover_Recovered_{symbol}",
                     f"[Rollover恢复] {info['old_symbol']} -> {symbol} "
                     f"has_data=True 等待={delay} "
-                    f"price={price}"
+                    f"price={price} 扩展时段开市={is_extended_open}",
+                    max_count=1
                 )
                 del self.pending_rollover_symbols[symbol]
 
             elif (
                 self.time - info["start_time"] > timedelta(minutes=10)
                 and not info.get("timeout_logged", False)
+                and is_extended_open
             ):
                 self._log_anomaly(
-                    "Rollover_NoData",
-                    f"[Rollover异常] {info['old_symbol']} -> {symbol} "
-                    f"超过10分钟仍 has_data=False; inSecurities={in_securities} "
-                    f"price={price}"
+                    f"Rollover_Wait_{symbol}",
+                    f"[Rollover开市等待] {info['old_symbol']} -> {symbol} "
+                    f"开市超过10分钟仍 has_data=False; "
+                    f"inSecurities={in_securities} price={price}",
+                    max_count=1
                 )
                 info["timeout_logged"] = True
 
@@ -432,10 +440,18 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 old_symbol = changed_event.old_symbol
                 new_symbol = changed_event.new_symbol
                 in_securities = new_symbol in self.securities  # 检查新合约是否在Securities
+                is_extended_open = (
+                    self.securities[new_symbol].exchange.hours.is_open(
+                        self.time, extended_market_hours=True
+                    )
+                    if in_securities else None
+                )
 
                 self.log(
                     f"[Mapping变化] {old_symbol} -> {new_symbol} "
-                    f"newInSecurities={in_securities}"
+                    f"newInSecurities={in_securities} "
+                    f"weekday={self.time.strftime('%a')} "
+                    f"扩展时段开市={is_extended_open}"
                 )
 
                 # 无论是否已经进入 Securities，都开始等待监控

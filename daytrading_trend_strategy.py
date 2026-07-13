@@ -505,6 +505,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 self.log(
                     f"[Mapping变化] {old_symbol} -> {new_symbol} "
                     f"newInSecurities={in_securities} "
+                    f"price={market_state['price']} has_data={market_state['has_data']} "
                     f"weekday={self.time.strftime('%a')} "
                     f"dateOpenExtended={market_state['is_date_open']} "
                     f"extendedOpen={market_state['is_extended_open']} "
@@ -521,13 +522,6 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     "timeout_logged": False,
                     "monitor_started_after_warmup": False
                 }
-
-                if in_securities:
-                    security = self.securities[new_symbol]
-                    self.log(
-                        f"[新合约状态] {new_symbol} "
-                        f"price={security.price} has_data={security.has_data}"
-                    )
 
         except Exception as ex:
             self._log_anomaly(

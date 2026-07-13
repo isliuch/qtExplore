@@ -25,7 +25,10 @@ def _log_anomaly(self, site, message, max_count=5):
         return
     self._log_site_counts[site] = count + 1
     self.log(message)
-    if count + 1 == max_count:
+    # max_count=1 is used for one-off lifecycle records (for example, one
+    # rollover recovery per contract).  A "suppressed" line immediately
+    # after such a record is misleading and wastes the limited log quota.
+    if max_count > 1 and count + 1 == max_count:
         self.log(f"[日志抑制] {site} 已达到{max_count}条上限，后续同类日志不再打印")
 
 # ------------------------------------------------------------------

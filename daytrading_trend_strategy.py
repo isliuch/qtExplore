@@ -246,15 +246,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
 
         for symbol, info in list(self.pending_rollover_symbols.items()):
-            in_securities = symbol in self.securities
-            has_data = in_securities and self.securities[symbol].has_data
-            price = self.securities[symbol].price if in_securities else None
-            is_extended_open = (
-                self.securities[symbol].exchange.hours.is_open(
-                    self.time, extended_market_hours=True
-                )
-                if in_securities else None
-            )
+            market_state = self._rollover_market_state(symbol)
+            in_securities = market_state["in_securities"]
+            has_data = market_state["has_data"]
+            price = market_state["price"]
+            is_extended_open = market_state["is_extended_open"]
 
             if has_data:
                 delay = self.time - info["start_time"]
@@ -262,7 +258,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     f"Rollover_Recovered_{symbol}",
                     f"[Rollover恢复] {info['old_symbol']} -> {symbol} "
                     f"has_data=True 等待={delay} "
-                    f"price={price} 扩展时段开市={is_extended_open}",
+                    f"price={price} 状态={market_state['label']}",
                     max_count=1
                 )
                 del self.pending_rollover_symbols[symbol]
@@ -270,13 +266,22 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             elif (
                 self.time - info["start_time"] > timedelta(minutes=10)
                 and not info.get("timeout_logged", False)
-                and is_extended_open
             ):
+                if not in_securities:
+                    tag = "Rollover订阅异常"
+                    detail = "新合约10分钟后仍不在Securities"
+                elif is_extended_open:
+                    tag = "Rollover开市等待"
+                    detail = "开市超过10分钟仍 has_data=False"
+                else:
+                    tag = "Rollover休市等待"
+                    detail = "当前不在交易时段，尚未要求数据恢复"
+
                 self._log_anomaly(
                     f"Rollover_Wait_{symbol}",
-                    f"[Rollover开市等待] {info['old_symbol']} -> {symbol} "
-                    f"开市超过10分钟仍 has_data=False; "
-                    f"inSecurities={in_securities} price={price}",
+                    f"[{tag}] {info['old_symbol']} -> {symbol} {detail}; "
+                    f"inSecurities={in_securities} price={price} "
+                    f"状态={market_state['label']}",
                     max_count=1
                 )
                 info["timeout_logged"] = True
@@ -425,6 +430,52 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.portfolio.total_portfolio_value:.2f}")
 
     # ------------------------------------------------------------------
+    def _rollover_market_state(self, symbol):
+        """Return an exchange-calendar classification for rollover diagnostics.
+
+        `has_data=False` alone does not tell us whether the exchange is
+        closed or whether Lean has not received a bar for an open contract.
+        The classification below makes that distinction explicit without
+        changing any trading logic.
+        """
+        if symbol not in self.securities:
+            return {
+                "in_securities": False,
+                "has_data": False,
+                "price": None,
+                "is_date_open": None,
+                "is_extended_open": None,
+                "label": "未订阅/不在Securities"
+            }
+
+        security = self.securities[symbol]
+        hours = security.exchange.hours
+        is_date_open = hours.is_date_open(
+            self.time, extended_market_hours=True
+        )
+        is_extended_open = hours.is_open(
+            self.time, extended_market_hours=True
+        )
+
+        if is_extended_open:
+            label = "交易时段内"
+        elif not is_date_open:
+            label = "假日或整日休市"
+        elif self.time.weekday() >= 5:
+            label = "周末休市"
+        else:
+            label = "交易日盘间休市"
+
+        return {
+            "in_securities": True,
+            "has_data": security.has_data,
+            "price": security.price,
+            "is_date_open": is_date_open,
+            "is_extended_open": is_extended_open,
+            "label": label
+        }
+
+    # ------------------------------------------------------------------
     def on_symbol_changed_events(self, symbol_changed_events):
         # 引擎自动回调：合约展期导致symbol映射变化时触发。纯诊断用途，
         # 用try/except兜底——哪怕这里面的字段名猜错了，也绝不能让诊断代码
@@ -439,19 +490,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             for _, changed_event in symbol_changed_events.items():
                 old_symbol = changed_event.old_symbol
                 new_symbol = changed_event.new_symbol
-                in_securities = new_symbol in self.securities  # 检查新合约是否在Securities
-                is_extended_open = (
-                    self.securities[new_symbol].exchange.hours.is_open(
-                        self.time, extended_market_hours=True
-                    )
-                    if in_securities else None
-                )
+                market_state = self._rollover_market_state(new_symbol)
+                in_securities = market_state["in_securities"]
 
                 self.log(
                     f"[Mapping变化] {old_symbol} -> {new_symbol} "
                     f"newInSecurities={in_securities} "
                     f"weekday={self.time.strftime('%a')} "
-                    f"扩展时段开市={is_extended_open}"
+                    f"dateOpenExtended={market_state['is_date_open']} "
+                    f"extendedOpen={market_state['is_extended_open']} "
+                    f"状态={market_state['label']}"
                 )
 
                 # 无论是否已经进入 Securities，都开始等待监控

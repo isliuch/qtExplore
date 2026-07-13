@@ -246,6 +246,13 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
 
         for symbol, info in list(self.pending_rollover_symbols.items()):
+            # A mapping event can occur while indicators are warming up.  The
+            # normal monitoring loop is intentionally skipped during warm-up,
+            # so start the delay clock only on this first live data point.
+            if info["start_time"] is None:
+                info["start_time"] = self.time
+                info["monitor_started_after_warmup"] = True
+
             market_state = self._rollover_market_state(symbol)
             in_securities = market_state["in_securities"]
             has_data = market_state["has_data"]
@@ -258,7 +265,9 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     f"Rollover_Recovered_{symbol}",
                     f"[Rollover恢复] {info['old_symbol']} -> {symbol} "
                     f"has_data=True 等待={delay} "
-                    f"price={price} 状态={market_state['label']}",
+                    f"price={price} 状态={market_state['label']} "
+                    f"mappingTime={info['mapping_time']}"
+                    f"{'（计时从warm-up结束后首根数据开始）' if info.get('monitor_started_after_warmup') else ''}",
                     max_count=1
                 )
                 del self.pending_rollover_symbols[symbol]
@@ -504,9 +513,13 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
                 # 无论是否已经进入 Securities，都开始等待监控
                 self.pending_rollover_symbols[new_symbol] = {
-                    "start_time": self.time,
+                    # Do not include warm-up in the data-availability delay.
+                    # The live on_data loop initializes this on its first bar.
+                    "start_time": None if self.is_warming_up else self.time,
+                    "mapping_time": self.time,
                     "old_symbol": old_symbol,
-                    "timeout_logged": False
+                    "timeout_logged": False,
+                    "monitor_started_after_warmup": False
                 }
 
                 if in_securities:

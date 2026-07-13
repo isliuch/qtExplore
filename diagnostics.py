@@ -47,7 +47,7 @@ def _monthly_heartbeat(self):
     # 日程本身还是每月1号触发（QC没有内置的"每季度"date_rule），
     # 这里只在季度起始月（1/4/7/10月）才真正执行，其余月份直接跳过，
     # 把日志频率从"每月"降到"每季度"，节省日志配额，留出更长的监控周期。
-    if self.time.month not in (1, 4, 7, 10):
+    if self.time.month not in (1, 7):
         return
     if not self.diagnostic_logging:
         return

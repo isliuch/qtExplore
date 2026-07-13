@@ -156,7 +156,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             raise Exception("至少需要打开一个品种的交易开关（trade_mnq / trade_mes / trade_mym）")
 
         for key, fut in self.futures.items():
-            fut.set_filter(0, 90)  # 只考虑90天内到期的近月合约
+            fut.set_filter(0, 180)  # 只考虑180天内到期的近月合约
 
             if self.debug_level >= 2:
                 self.log(

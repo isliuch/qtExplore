@@ -193,6 +193,9 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 当前实际可交易（映射）合约
         self.mapped_symbol = {k: None for k in self.futures}
 
+        # 记录rollover后等待行情恢复的合约
+        self.pending_rollover_symbols = {}
+
         # 持仓状态（只在订单真正Filled后才更新，见 on_order_event）
         self.position_side = {k: 0 for k in self.futures}   # 1多 / -1空 / 0空仓
         self.stop_price    = {k: None for k in self.futures}
@@ -240,6 +243,32 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # 保证策略不会因为记账bug而永久停摆。
         self._reconcile_state()
 
+
+        for symbol, info in list(self.pending_rollover_symbols.items()):
+
+            if self._has_valid_price(symbol):
+
+                delay = self.Time - info["start_time"]
+
+                self._log_anomaly("Rollover_Recovered",
+                    f"[Rollover恢复] "
+                    f"{info['old_symbol']} -> {symbol} "
+                    f"等待={delay}"
+                )
+
+                del self.pending_rollover_symbols[symbol]
+
+
+            elif self.Time - info["start_time"] > timedelta(minutes=10):
+
+                self._log_anomaly("Rollover_NoData",
+                    f"[Rollover异常] "
+                    f"{info['old_symbol']} -> {symbol} "
+                    f"超过10分钟无有效数据"
+                )
+
+                del self.pending_rollover_symbols[symbol]
+
         # 更新映射合约（每次rollover后 mapped 会变化）；如果当前持仓的合约不再是
         # 最新近月合约，说明发生了展期，主动平掉旧合约，而不是等摘牌被动强平
         # （被动强平那笔订单用的是旧合约symbol，容易和已经刷新的mapped_symbol对不上，
@@ -252,11 +281,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     f"on_data [Mapped检查] {self.time} "
                     f"{key} "
                     f"mapped={new_mapped} "
-                    f"inSecurities={new_mapped in self.securities if new_mapped else False}"
+                    f"inSecurities={new_mapped in self.Securities if new_mapped else False}"
                 )
 
             if new_mapped:
-                contract = self.securities[new_mapped]
+                contract = self.Securities[new_mapped]
                 self._debug_log(
                     2,
                     f"[Mapped Contract]"
@@ -397,9 +426,20 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             for changed_event in symbol_changed_events.values():
                 old_symbol = changed_event.old_symbol
                 new_symbol = changed_event.new_symbol
-                self.log(f"[Mapping变化] {old_symbol} -> {new_symbol}")
-                if new_symbol in self.securities:
-                    security = self.securities[new_symbol]
+                self.log(
+                    f"[Mapping变化] {old_symbol} -> {new_symbol}"
+                    f" newInSecurities={new_symbol in self.Securities}" # 检查新合约是否在Securities
+                )
+
+                # 无论是否已经进入 Securities，都开始等待监控
+                self.pending_rollover_symbols[new_symbol] = {
+                    "start_time": self.Time,
+                    "old_symbol": old_symbol
+                }
+                
+                if new_symbol in self.Securities:
+                    security = self.Securities[new_symbol]
+
                     self.log(f"[新合约状态] {new_symbol} price={security.price} has_data={security.has_data}")
         except Exception as ex:
             self._log_anomaly("symbol_changed_exception", f"[Mapping变化-诊断异常] {self.time} {ex}", max_count=10)

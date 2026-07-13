@@ -11,7 +11,7 @@ def _make_consolidation_handler(self, key: str):
     return handler
 
 # ------------------------------------------------------------------
-def _log_anomaly(self, site, message, max_count=15):
+def _log_anomaly(self, site, message, max_count=5):
     """
     异常/关键事件日志：不管debug_level是多少都会尝试打印，但同一个site
     (日志来源标识，比如"mapped_none_MNQ")最多打印max_count次，超过就

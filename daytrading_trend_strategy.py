@@ -263,7 +263,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 delay = self.time - info["start_time"]
                 self._log_anomaly(
                     f"Rollover_Recovered_{symbol}",
-                    f"[Rollover恢复] {info['old_symbol']} -> {symbol} "
+                    f"[Rollover恢复] {self._format_future_contract(info['old_symbol'])} "
+                    f"-> {self._format_future_contract(symbol)} "
                     f"has_data=True 等待={delay} "
                     f"price={price} 状态={market_state['label']} "
                     f"mappingTime={info['mapping_time']}"
@@ -288,7 +289,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
                 self._log_anomaly(
                     f"Rollover_Wait_{symbol}",
-                    f"[{tag}] {info['old_symbol']} -> {symbol} {detail}; "
+                    f"[{tag}] {self._format_future_contract(info['old_symbol'])} "
+                    f"-> {self._format_future_contract(symbol)} {detail}; "
                     f"inSecurities={in_securities} price={price} "
                     f"状态={market_state['label']}",
                     max_count=1
@@ -329,14 +331,16 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     f"[警告]{self.time.date()} {key} mapped合约变为None，展期解析失败")
             elif new_mapped is not None and self.mapped_symbol.get(key) is None and self.mapped_symbol.get(key) != new_mapped:
                 self._log_anomaly(f"mapped_recover_{key}",
-                    f"[恢复]{self.time.date()} {key} mapped合约恢复为 {new_mapped.value}")
+                    f"[恢复]{self.time.date()} {key} mapped合约恢复为 "
+                    f"{self._format_future_contract(new_mapped)}")
 
             if (self.position_side[key] != 0 and old_holding is not None
                     and new_mapped is not None and new_mapped != old_holding):
                 if self._has_valid_price(old_holding):
                     self.liquidate(old_holding)
                     self._log_anomaly(f"roll_{key}",
-                        f"[展期]{self.time.date()} {key} 平掉旧合约 {old_holding.value}", max_count=30)
+                        f"[展期]{self.time.date()} {key} 平掉旧合约 "
+                        f"{self._format_future_contract(old_holding)}", max_count=30)
             self.mapped_symbol[key] = new_mapped
 
         # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓（止损止盈仍照常执行）
@@ -485,6 +489,36 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         }
 
     # ------------------------------------------------------------------
+    def _format_future_contract(self, symbol) -> str:
+        """Return a readable futures ticker and expiry instead of Lean's hash."""
+        if symbol is None:
+            return "None"
+
+        # In this Lean build, SymbolChangedEvent.old_symbol can arrive as its
+        # serialized string (for example, "MNQ XUERC...") instead of a Symbol.
+        # Deserialize it before reading ID.Date.
+        if isinstance(symbol, str):
+            try:
+                symbol = self.symbol(symbol)
+            except Exception:
+                return symbol
+
+        symbol_id = getattr(symbol, "id", None)
+        if symbol_id is None:
+            return str(symbol)
+
+        try:
+            expiry = symbol_id.date
+            value = getattr(symbol, "value", str(symbol))
+            return (
+                f"{value}"
+                f"(expiry={expiry.year:04d}-{expiry.month:02d}-{expiry.day:02d})"
+            )
+        except Exception:
+            # Diagnostic formatting must never interrupt a backtest.
+            return str(symbol)
+
+    # ------------------------------------------------------------------
     def on_symbol_changed_events(self, symbol_changed_events):
         # 引擎自动回调：合约展期导致symbol映射变化时触发。纯诊断用途，
         # 用try/except兜底——哪怕这里面的字段名猜错了，也绝不能让诊断代码
@@ -503,7 +537,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 in_securities = market_state["in_securities"]
 
                 self.log(
-                    f"[Mapping变化] {old_symbol} -> {new_symbol} "
+                    f"[Mapping变化] {self._format_future_contract(old_symbol)} "
+                    f"-> {self._format_future_contract(new_symbol)} "
                     f"newInSecurities={in_securities} "
                     f"price={market_state['price']} has_data={market_state['has_data']} "
                     f"weekday={self.time.strftime('%a')} "

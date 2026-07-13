@@ -245,29 +245,29 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
 
         for symbol, info in list(self.pending_rollover_symbols.items()):
+            in_securities = symbol in self.securities
+            #这里故意用 has_data，而不是 _has_valid_price()；你的目标是测量“何时有数据”，价格是否大于零是下一层的可交易性检查。
+            has_data = in_securities and self.securities[symbol].has_data
 
-            if self._has_valid_price(symbol):
-
-                delay = self.Time - info["start_time"]
-
-                self._log_anomaly("Rollover_Recovered",
-                    f"[Rollover恢复] "
-                    f"{info['old_symbol']} -> {symbol} "
-                    f"等待={delay}"
+            if has_data:
+                delay = self.time - info["start_time"]
+                self._log_anomaly(
+                    "Rollover_Recovered",
+                    f"[Rollover恢复] {info['old_symbol']} -> {symbol} "
+                    f"has_data=True 等待={delay}"
                 )
-
                 del self.pending_rollover_symbols[symbol]
 
-
-            elif self.Time - info["start_time"] > timedelta(minutes=10):
-
-                self._log_anomaly("Rollover_NoData",
-                    f"[Rollover异常] "
-                    f"{info['old_symbol']} -> {symbol} "
-                    f"超过10分钟无有效数据"
+            elif (
+                self.time - info["start_time"] > timedelta(minutes=10)
+                and not info.get("timeout_logged", False)
+            ):
+                self._log_anomaly(
+                    "Rollover_NoData",
+                    f"[Rollover异常] {info['old_symbol']} -> {symbol} "
+                    f"超过10分钟仍 has_data=False; inSecurities={in_securities}"
                 )
-
-                del self.pending_rollover_symbols[symbol]
+                info["timeout_logged"] = True
 
         # 更新映射合约（每次rollover后 mapped 会变化）；如果当前持仓的合约不再是
         # 最新近月合约，说明发生了展期，主动平掉旧合约，而不是等摘牌被动强平
@@ -423,26 +423,37 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         try:
             if not self.diagnostic_logging:
                 return
-            for changed_event in symbol_changed_events.values():
+
+            for _, changed_event in symbol_changed_events.items():
                 old_symbol = changed_event.old_symbol
                 new_symbol = changed_event.new_symbol
+                in_securities = new_symbol in self.securities  # 检查新合约是否在Securities
+
                 self.log(
-                    f"[Mapping变化] {old_symbol} -> {new_symbol}"
-                    f" newInSecurities={new_symbol in self.Securities}" # 检查新合约是否在Securities
+                    f"[Mapping变化] {old_symbol} -> {new_symbol} "
+                    f"newInSecurities={in_securities}"
                 )
 
                 # 无论是否已经进入 Securities，都开始等待监控
                 self.pending_rollover_symbols[new_symbol] = {
-                    "start_time": self.Time,
-                    "old_symbol": old_symbol
+                    "start_time": self.time,
+                    "old_symbol": old_symbol,
+                    "timeout_logged": False
                 }
-                
-                if new_symbol in self.Securities:
-                    security = self.Securities[new_symbol]
 
-                    self.log(f"[新合约状态] {new_symbol} price={security.price} has_data={security.has_data}")
+                if in_securities:
+                    security = self.securities[new_symbol]
+                    self.log(
+                        f"[新合约状态] {new_symbol} "
+                        f"price={security.price} has_data={security.has_data}"
+                    )
+
         except Exception as ex:
-            self._log_anomaly("symbol_changed_exception", f"[Mapping变化-诊断异常] {self.time} {ex}", max_count=10)
+            self._log_anomaly(
+                "symbol_changed_exception",
+                f"[Mapping变化-诊断异常] {self.time} {ex}",
+                max_count=10
+            )
 
 
 # ------------------------------------------------------------------

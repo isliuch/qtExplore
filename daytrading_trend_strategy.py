@@ -147,7 +147,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 Resolution.MINUTE,
                 data_normalization_mode=DataNormalizationMode.BACKWARDS_RATIO,
                 data_mapping_mode=DataMappingMode.LAST_TRADING_DAY,  # 按到期日展期，不依赖持仓量数据，更稳定
-                contract_depth_offset=0
+                contract_depth_offset=0,
+                extended_market_hours=True
             )
             self.multiplier[key] = cfg["multiplier"]
 
@@ -248,13 +249,15 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             in_securities = symbol in self.securities
             #这里故意用 has_data，而不是 _has_valid_price()；你的目标是测量“何时有数据”，价格是否大于零是下一层的可交易性检查。
             has_data = in_securities and self.securities[symbol].has_data
+            price = self.securities[symbol].price if in_securities else None
 
             if has_data:
                 delay = self.time - info["start_time"]
                 self._log_anomaly(
                     "Rollover_Recovered",
                     f"[Rollover恢复] {info['old_symbol']} -> {symbol} "
-                    f"has_data=True 等待={delay}"
+                    f"has_data=True 等待={delay} "
+                    f"price={price}"
                 )
                 del self.pending_rollover_symbols[symbol]
 
@@ -265,7 +268,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 self._log_anomaly(
                     "Rollover_NoData",
                     f"[Rollover异常] {info['old_symbol']} -> {symbol} "
-                    f"超过10分钟仍 has_data=False; inSecurities={in_securities}"
+                    f"超过10分钟仍 has_data=False; inSecurities={in_securities} "
+                    f"price={price}"
                 )
                 info["timeout_logged"] = True
 

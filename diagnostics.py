@@ -25,11 +25,6 @@ def _log_anomaly(self, site, message, max_count=5):
         return
     self._log_site_counts[site] = count + 1
     self.log(message)
-    # max_count=1 is used for one-off lifecycle records (for example, one
-    # rollover recovery per contract).  A "suppressed" line immediately
-    # after such a record is misleading and wastes the limited log quota.
-    if max_count > 1 and count + 1 == max_count:
-        self.log(f"[日志抑制] {site} 已达到{max_count}条上限，后续同类日志不再打印")
 
 # ------------------------------------------------------------------
 def _debug_log(self, level: int, message: str) -> None:
@@ -47,18 +42,25 @@ def _monthly_heartbeat(self):
     # 日程本身还是每月1号触发（QC没有内置的"每季度"date_rule），
     # 这里只在季度起始月（1/4/7/10月）才真正执行，其余月份直接跳过，
     # 把日志频率从"每月"降到"每季度"，节省日志配额，留出更长的监控周期。
-    if self.time.month not in (1, 7):
+    # A full backtest only needs one compact account checkpoint per year.
+    if self.time.month != 1:
         return
     if not self.diagnostic_logging:
         return
     status = " ".join(
-        f"{k}[side={self.position_side[k]},hold={'Y' if self.holding_symbol[k] else 'N'},"
-        f"mapped={'Y' if self.mapped_symbol.get(k) else 'N'},"
-        f"cd={'Y' if (self.cooldown_until[k] is not None and self.time < self.cooldown_until[k]) else 'N'}]"
+        f"{k}={'L' if self.position_side[k] > 0 else 'S' if self.position_side[k] < 0 else 'flat'}"
+        f",mapped={'Y' if self.mapped_symbol.get(k) else 'N'}"
+        f",cd={'Y' if (self.cooldown_until[k] is not None and self.time < self.cooldown_until[k]) else 'N'}"
         for k in self.futures
     )
-    self.log(f"[心跳]{self.time.date()} 总成交={self.trade_count} "
-             f"权益={self.portfolio.total_portfolio_value:.0f} halt={self.trading_halted_today} {status}")
+    self.log(f"[HB] trades={self.trade_count} "
+             f"equity={self.portfolio.total_portfolio_value:.0f} "
+             f"halt={self.trading_halted_today} {status}")
+
+    # Indicator detail is useful only in a deliberately short, level-2
+    # investigation. Keep annual heartbeats compact for normal backtests.
+    if self.debug_level < 2:
+        return
 
     # 信号诊断：显示每个品种的指标就绪状态和信号被阻塞的原因
     for k in self.futures:

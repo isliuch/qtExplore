@@ -222,7 +222,10 @@ def _rebalance(self, signals):
         quantity = min(quantity, max_affordable)
 
         if quantity < 1:
-            self._log_anomaly(f"final_block_{key}", f"[最终阻断]{self.time.date()} {key} quantity={quantity}")
+            self._log_anomaly(
+                f"final_block_{key}",
+                f"[最终仓位阻断] {key} quantity={quantity}"
+            )
             continue
 
         # 记录待成交方向和止损/止盈距离，实际价位等 on_order_event 里成交后再算

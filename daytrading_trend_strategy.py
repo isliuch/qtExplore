@@ -349,11 +349,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             if dd <= -self.daily_loss_limit:
                 self.trading_halted_today = True
                 self._log_anomaly("daily_loss_halt",
-                    f"[日亏损熔断]{self.time.date()} 触发单日亏损限制 {dd:.2%}，今日停止开新仓")
+                    f"[日亏损熔断] 收益={dd:.2%}")
             elif self.daily_profit_target is not None and dd >= self.daily_profit_target:
                 self.trading_halted_today = True
                 self._log_anomaly("daily_profit_halt",
-                    f"[日盈利锁定]{self.time.date()} 达到单日盈利目标 {dd:.2%}，今日停止开新仓")
+                    f"[日盈利锁定] 收益={dd:.2%}")
 
         # 止损止盈检查，任何时段都执行，保护已有持仓
         for key in self.futures:
@@ -404,7 +404,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     if self.consecutive_losses >= self.max_consecutive_losses:
                         self.trading_halted_today = True
                         self._log_anomaly("consecutive_loss_halt",
-                            f"[连续亏损熔断]{self.time.date()} {key} 单日连续亏损达到{self.consecutive_losses}笔，今日停止开新仓")
+                            f"[连续亏损熔断] {key} 连亏={self.consecutive_losses}")
                 else:
                     self.consecutive_losses = 0
 
@@ -489,7 +489,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         }
 
     # ------------------------------------------------------------------
-    def _format_future_contract(self, symbol) -> str:
+    def _format_future_contract(self, symbol, include_expiry: bool = True) -> str:
         """Return a readable futures ticker and expiry instead of Lean's hash."""
         if symbol is None:
             return "None"
@@ -510,10 +510,9 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         try:
             expiry = symbol_id.date
             value = getattr(symbol, "value", str(symbol))
-            return (
-                f"{value}"
-                f"(expiry={expiry.year:04d}-{expiry.month:02d}-{expiry.day:02d})"
-            )
+            if not include_expiry:
+                return value
+            return f"{value}(expiry={expiry.year:04d}-{expiry.month:02d}-{expiry.day:02d})"
         except Exception:
             # Diagnostic formatting must never interrupt a backtest.
             return str(symbol)
@@ -535,6 +534,15 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 new_symbol = changed_event.new_symbol
                 market_state = self._rollover_market_state(new_symbol)
                 in_securities = market_state["in_securities"]
+
+                # The normal case is one concise line. Detailed lifecycle
+                # logging is reserved for a mapping with no usable data.
+                if in_securities and market_state["has_data"]:
+                    self.log(
+                        f"[Roll] {self._format_future_contract(old_symbol, False)}"
+                        f"→{self._format_future_contract(new_symbol, False)} ok"
+                    )
+                    continue
 
                 self.log(
                     f"[Mapping变化] {self._format_future_contract(old_symbol)} "

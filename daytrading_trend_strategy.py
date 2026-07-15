@@ -74,9 +74,10 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.atr_high_pct  = 0.90    # ATR高于历史90分位 -> 波动过大/极端行情，不交易
 
         self.total_risk_budget = 0.01   # 组合总风险预算：账户权益的1%（两条腿合计）
-        self.atr_stop_mult     = 2.0    # 止损距离 = N倍ATR
+        self.atr_stop_mult     = 2.0    # stop_loss_mode="atr" 时：止损距离 = N倍ATR
         self.atr_target_mult   = 3.0    # 止盈距离 = N倍ATR
         self.daily_loss_limit  = 0.02   # 单日最大亏损占权益比例，触发后当日停止开新仓
+        self.daily_loss_limit_dollars = 300.0  # 单日最大亏损金额，触发后当日停止开新仓
 
         self.margin_safety_buffer = 0.5  # 只使用 margin_remaining 的这个比例做新仓位，留缓冲
 
@@ -99,6 +100,17 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             "MNQ": {"enabled": self.trade_mnq, "multiplier": 2.0},
             "MES": {"enabled": self.trade_mes, "multiplier": 5.0},
             "MYM": {"enabled": self.trade_mym, "multiplier": 0.5},
+        }
+
+        # Initial stop-loss mode: switch to "atr" to restore the original
+        # ATR-multiple calculation.  The active fixed-dollar mode converts
+        # $60/contract into points: MNQ=30, MES=12, MYM=120.
+        self.stop_loss_mode = "fixed_dollar"  # "fixed_dollar" or "atr"
+        self.stop_loss_dollars_per_contract = 60.0
+        self.max_contracts_per_symbol = {
+            "MNQ": 5,
+            "MES": 10,
+            "MYM": 10,
         }
 
         # v11修复：期货保证金不能使用 price*multiplier/leverage 估算。
@@ -345,8 +357,14 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓（止损止盈仍照常执行）
         if not self.trading_halted_today and self.daily_start_equity > 0:
-            dd = (self.portfolio.total_portfolio_value - self.daily_start_equity) / self.daily_start_equity
-            if dd <= -self.daily_loss_limit:
+            daily_pnl = self.portfolio.total_portfolio_value - self.daily_start_equity
+            dd = daily_pnl / self.daily_start_equity
+            if daily_pnl <= -self.daily_loss_limit_dollars:
+                self.trading_halted_today = True
+                self._log_anomaly("daily_dollar_loss_halt",
+                    f"[日亏损金额熔断] 日内损益=${daily_pnl:.2f} "
+                    f"限额=-${self.daily_loss_limit_dollars:.2f}")
+            elif dd <= -self.daily_loss_limit:
                 self.trading_halted_today = True
                 self._log_anomaly("daily_loss_halt",
                     f"[日亏损熔断] 收益={dd:.2%}")
@@ -590,6 +608,7 @@ ATRTrendRiskParityMNQMES._reconcile_state = risk_management._reconcile_state
 ATRTrendRiskParityMNQMES._reset_position_state = risk_management._reset_position_state
 ATRTrendRiskParityMNQMES._in_session = risk_management._in_session
 ATRTrendRiskParityMNQMES._has_valid_price = risk_management._has_valid_price
+ATRTrendRiskParityMNQMES._calculate_stop_loss = risk_management._calculate_stop_loss
 ATRTrendRiskParityMNQMES._get_signal = risk_management._get_signal
 ATRTrendRiskParityMNQMES._rebalance = risk_management._rebalance
 ATRTrendRiskParityMNQMES._check_stop_target = risk_management._check_stop_target

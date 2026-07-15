@@ -34,9 +34,23 @@ def _reconcile_state(self):
                 self.position_side[key] = 1 if actual_qty > 0 else -1
                 self.holding_symbol[key] = holding
                 self.entry_price[key] = self.portfolio[holding].average_price
-                atr_val = self.atr_ind[key].current.value if self.atr_ind[key].is_ready else None
-                self.initial_stop_dist[key] = atr_val * self.atr_stop_mult if atr_val else None
-                self.stop_price[key] = None
+                atr_value = (
+                    self.atr_ind[key].current.value
+                    if self.atr_ind[key].is_ready else None
+                )
+                self.initial_stop_dist[key], _ = self._calculate_stop_loss(
+                    key, atr_value
+                )
+                if self.position_side[key] == 1:
+                    self.stop_price[key] = (
+                        self.entry_price[key] - self.initial_stop_dist[key]
+                        if self.initial_stop_dist[key] is not None else None
+                    )
+                else:
+                    self.stop_price[key] = (
+                        self.entry_price[key] + self.initial_stop_dist[key]
+                        if self.initial_stop_dist[key] is not None else None
+                    )
                 self.target_price[key] = None
                 self.trailing_active[key] = False
 
@@ -65,6 +79,36 @@ def _has_valid_price(self, symbol) -> bool:
             and symbol in self.securities
             and self.securities[symbol].has_data
             and self.securities[symbol].price > 0)
+
+# ------------------------------------------------------------------
+def _calculate_stop_loss(self, key: str, atr_value=None):
+    """Return (stop_distance_points, dollar_risk_per_contract).
+
+    Set ``stop_loss_mode`` to ``fixed_dollar`` for a constant dollar loss per
+    contract, or to ``atr`` to use the strategy's original ATR-multiple stop.
+    ``None`` is returned for both values when the selected calculation cannot
+    produce a valid positive stop distance.
+    """
+    multiplier = self.multiplier[key]
+
+    if self.stop_loss_mode == "fixed_dollar":
+        dollar_risk = self.stop_loss_dollars_per_contract
+        stop_distance = dollar_risk / multiplier if multiplier > 0 else None
+    elif self.stop_loss_mode == "atr":
+        stop_distance = (
+            atr_value * self.atr_stop_mult
+            if atr_value is not None and atr_value > 0 else None
+        )
+        dollar_risk = stop_distance * multiplier if stop_distance else None
+    else:
+        raise ValueError(
+            "stop_loss_mode must be 'fixed_dollar' or 'atr', "
+            f"got {self.stop_loss_mode!r}"
+        )
+
+    if stop_distance is None or stop_distance <= 0:
+        return None, None
+    return stop_distance, dollar_risk
 
 # ------------------------------------------------------------------
 def _get_signal(self, key: str) -> int:
@@ -171,11 +215,12 @@ def _rebalance(self, signals):
         risk_dollars_leg = risk_dollars_total * weight
 
         atr_val = self.atr_ind[key].current.value
-        stop_distance_points = atr_val * self.atr_stop_mult
+        stop_distance_points, dollar_risk_per_contract = self._calculate_stop_loss(
+            key, atr_val
+        )
         target_distance_points = atr_val * self.atr_target_mult
-        dollar_risk_per_contract = stop_distance_points * self.multiplier[key]
 
-        if dollar_risk_per_contract <= 0:
+        if dollar_risk_per_contract is None:
             continue
 
         quantity = int(risk_dollars_leg / dollar_risk_per_contract)
@@ -219,7 +264,11 @@ def _rebalance(self, signals):
                 f"maxQty={max_affordable}"
             )
 
-        quantity = min(quantity, max_affordable)
+        quantity = min(
+            quantity,
+            max_affordable,
+            self.max_contracts_per_symbol[key],
+        )
 
         if quantity < 1:
             self._log_anomaly(

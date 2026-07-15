@@ -2,6 +2,7 @@
 from AlgorithmImports import *
 import diagnostics
 import risk_management
+import strategies
 # endregion
 
 class ATRTrendRiskParityMNQMES(QCAlgorithm):
@@ -61,6 +62,11 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.set_cash(50000)
         self.set_time_zone(TimeZones.NEW_YORK)
         self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE, AccountType.MARGIN)
+
+        # Switch entry logic by changing this name. New implementations belong
+        # in strategies.py and are registered in its STRATEGIES dictionary.
+        self.strategy_name = "ema_trend"
+        self.active_strategy = strategies.create_strategy(self.strategy_name)
 
         # ------------------ 策略参数 ------------------
         self.fast_period   = 20      # 快速EMA周期（基于5分钟K线）
@@ -184,21 +190,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         for key, fut in self.futures.items():
             symbol = fut.symbol
 
-            self.ema_fast[key]   = ExponentialMovingAverage(self.fast_period)
-            self.ema_slow[key]   = ExponentialMovingAverage(self.slow_period)
-            self.atr_ind[key]    = AverageTrueRange(self.atr_period, MovingAverageType.WILDERS)
-            self.adx_ind[key]    = AverageDirectionalIndex(self.adx_period)
-            self.atr_window[key] = RollingWindow[float](self.atr_lookback)
-
             consolidator = TradeBarConsolidator(timedelta(minutes=5))
             consolidator.data_consolidated += self._make_consolidation_handler(key)
             self.subscription_manager.add_consolidator(symbol, consolidator)
             self.consolidators[key] = consolidator
 
-            self.register_indicator(symbol, self.ema_fast[key], consolidator)
-            self.register_indicator(symbol, self.ema_slow[key], consolidator)
-            self.register_indicator(symbol, self.atr_ind[key], consolidator)
-            self.register_indicator(symbol, self.adx_ind[key], consolidator)
+            self.active_strategy.initialize(self, key, symbol, consolidator)
 
         # 当前实际可交易（映射）合约
         self.mapped_symbol = {k: None for k in self.futures}

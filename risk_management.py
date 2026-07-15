@@ -111,7 +111,9 @@ def _calculate_stop_loss(self, key: str, atr_value=None):
     return stop_distance, dollar_risk
 
 # ------------------------------------------------------------------
-def _get_signal(self, key: str) -> int:
+# Kept as a behavior reference while additional strategy implementations are
+# introduced. Runtime signal selection is handled by _get_signal below.
+def _get_signal_legacy(self, key: str) -> int:
     """趋势 + ATR过滤 信号：1做多 -1做空 0不操作"""
     if not (self.ema_fast[key].is_ready and self.ema_slow[key].is_ready
             and self.atr_ind[key].is_ready and self.adx_ind[key].is_ready):
@@ -136,6 +138,11 @@ def _get_signal(self, key: str) -> int:
     elif fast < slow:
         return -1
     return 0
+
+# ------------------------------------------------------------------
+def _get_signal(self, key: str) -> int:
+    """Ask the selected entry strategy for a long, short, or flat signal."""
+    return self.active_strategy.get_signal(self, key)
 
 # ------------------------------------------------------------------
 def _rebalance(self, signals):

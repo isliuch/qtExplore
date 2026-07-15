@@ -6,8 +6,7 @@ from AlgorithmImports import *
 # ------------------------------------------------------------------
 def _make_consolidation_handler(self, key: str):
     def handler(sender, bar):
-        if self.atr_ind[key].is_ready:
-            self.atr_window[key].add(self.atr_ind[key].current.value)
+        self.active_strategy.on_consolidated_bar(self, key, bar)
     return handler
 
 # ------------------------------------------------------------------
@@ -59,7 +58,7 @@ def _monthly_heartbeat(self):
 
     # Indicator detail is useful only in a deliberately short, level-2
     # investigation. Keep annual heartbeats compact for normal backtests.
-    if self.debug_level < 2:
+    if self.debug_level < 2 or self.strategy_name != "ema_trend":
         return
 
     # 信号诊断：显示每个品种的指标就绪状态和信号被阻塞的原因

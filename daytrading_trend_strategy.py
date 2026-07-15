@@ -77,7 +77,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.atr_stop_mult     = 2.0    # stop_loss_mode="atr" 时：止损距离 = N倍ATR
         self.atr_target_mult   = 3.0    # 止盈距离 = N倍ATR
         self.daily_loss_limit  = 0.02   # 单日最大亏损占权益比例，触发后当日停止开新仓
-        self.daily_loss_limit_dollars = 300.0  # 单日最大亏损金额，触发后当日停止开新仓
+        self.daily_loss_limit_dollars = 300.0
 
         self.margin_safety_buffer = 0.5  # 只使用 margin_remaining 的这个比例做新仓位，留缓冲
 
@@ -102,9 +102,6 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             "MYM": {"enabled": self.trade_mym, "multiplier": 0.5},
         }
 
-        # Initial stop-loss mode: switch to "atr" to restore the original
-        # ATR-multiple calculation.  The active fixed-dollar mode converts
-        # $60/contract into points: MNQ=30, MES=12, MYM=120.
         self.stop_loss_mode = "fixed_dollar"  # "fixed_dollar" or "atr"
         self.stop_loss_dollars_per_contract = 60.0
         self.max_contracts_per_symbol = {
@@ -462,13 +459,6 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
     # ------------------------------------------------------------------
     def _rollover_market_state(self, symbol):
-        """Return an exchange-calendar classification for rollover diagnostics.
-
-        `has_data=False` alone does not tell us whether the exchange is
-        closed or whether Lean has not received a bar for an open contract.
-        The classification below makes that distinction explicit without
-        changing any trading logic.
-        """
         if symbol not in self.securities:
             return {
                 "in_securities": False,
@@ -508,13 +498,9 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
     # ------------------------------------------------------------------
     def _format_future_contract(self, symbol, include_expiry: bool = True) -> str:
-        """Return a readable futures ticker and expiry instead of Lean's hash."""
         if symbol is None:
             return "None"
 
-        # In this Lean build, SymbolChangedEvent.old_symbol can arrive as its
-        # serialized string (for example, "MNQ XUERC...") instead of a Symbol.
-        # Deserialize it before reading ID.Date.
         if isinstance(symbol, str):
             try:
                 symbol = self.symbol(symbol)
@@ -553,8 +539,6 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 market_state = self._rollover_market_state(new_symbol)
                 in_securities = market_state["in_securities"]
 
-                # The normal case is one concise line. Detailed lifecycle
-                # logging is reserved for a mapping with no usable data.
                 if in_securities and market_state["has_data"]:
                     self.log(
                         f"[Roll] {self._format_future_contract(old_symbol, False)}"

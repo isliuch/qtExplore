@@ -2,6 +2,7 @@
 from AlgorithmImports import *
 import diagnostics
 import risk_management
+import risk_profiles
 import strategies
 # endregion
 
@@ -67,34 +68,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         # in strategies.py and are registered in its STRATEGIES dictionary.
         self.strategy_name = "ema_trend"
         self.active_strategy = strategies.create_strategy(self.strategy_name)
+        self.active_strategy.configure(self)
+        risk_profiles.apply_common_risk(self)
 
-        # ------------------ 策略参数 ------------------
-        self.fast_period   = 20      # 快速EMA周期（基于5分钟K线）
-        self.slow_period   = 60      # 慢速EMA周期（基于5分钟K线）
-        self.atr_period    = 14      # ATR周期
-        self.adx_period    = 14      # ADX周期
-        self.adx_threshold = 20      # 趋势强度阈值，低于此值视为盘整，不交易
-
-        self.atr_lookback  = 100     # ATR历史分位数回溯窗口（5分钟bar数）
-        self.atr_low_pct   = 0.20    # ATR低于历史20分位 -> 波动太小，不交易
-        self.atr_high_pct  = 0.90    # ATR高于历史90分位 -> 波动过大/极端行情，不交易
-
-        self.total_risk_budget = 0.01   # 组合总风险预算：账户权益的1%（两条腿合计）
-        self.atr_stop_mult     = 2.0    # stop_loss_mode="atr" 时：止损距离 = N倍ATR
-        self.atr_target_mult   = 3.0    # 止盈距离 = N倍ATR
-        self.daily_loss_limit  = 0.02   # 单日最大亏损占权益比例，触发后当日停止开新仓
-        self.daily_loss_limit_dollars = 300.0
-
-        self.margin_safety_buffer = 0.5  # 只使用 margin_remaining 的这个比例做新仓位，留缓冲
-
-        # ------------------ 日内交易风控参数 ------------------
-        self.max_trades_per_symbol_per_day = 4     # 单品种每日最多开仓次数
-        self.loss_cooldown_minutes         = 30    # 止损离场后，同一品种冷却这么久才能再开仓
-        self.max_consecutive_losses        = 3     # 单日连续亏损次数达到此值，当日停止开新仓
-        self.max_daily_orders              = 300   # 全策略单日订单数硬上限（安全阀，远低于QC限额）
-        self.daily_profit_target           = 0.03  # 单日盈利达到此比例后停止开新仓；设为 None 关闭该功能
-        self.trailing_activation_r         = 1.0   # 浮盈达到N倍初始止损距离后，启动移动止损
-        self.trailing_atr_mult             = 1.5   # 移动止损跟踪距离 = N倍ATR
+        # Strategy parameters and strategy-specific risk controls live with
+        # their strategy in strategies.py. Account-wide limits live in
+        # risk_profiles.py and apply regardless of the selected strategy.
 
         # ------------------ 品种开关：控制本次运行交易哪些品种 ------------------
         self.trade_mnq = True   # Micro E-mini Nasdaq-100
@@ -106,24 +85,6 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             "MNQ": {"enabled": self.trade_mnq, "multiplier": 2.0},
             "MES": {"enabled": self.trade_mes, "multiplier": 5.0},
             "MYM": {"enabled": self.trade_mym, "multiplier": 0.5},
-        }
-
-        self.stop_loss_mode = "fixed_dollar"  # "fixed_dollar" or "atr"
-        self.stop_loss_dollars_per_contract = 60.0
-        self.max_contracts_per_symbol = {
-            "MNQ": 5,
-            "MES": 10,
-            "MYM": 10,
-        }
-
-        # v11修复：期货保证金不能使用 price*multiplier/leverage 估算。
-        # QC某些期货对象的leverage会返回1，导致把期货当股票全额占用资金，
-        # 在MNQ上涨后会出现 quantity=0，从而永久没有订单。
-        # 这里使用近似SPAN保证金，仅用于仓位上限控制。
-        self.futures_margin = {
-            "MNQ": 2500,   # Micro Nasdaq-100
-            "MES": 1500,   # Micro S&P500
-            "MYM": 1000    # Micro Dow
         }
 
         # 免费/低等级账户日志配额只有10KB/天，逐笔打印很快就会被截断。

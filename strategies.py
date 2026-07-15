@@ -7,6 +7,15 @@ class SignalStrategy:
     """Contract for interchangeable entry-signal strategies."""
 
     name = None
+    parameters = {}
+    risk_parameters = {}
+
+    def configure(self, algorithm):
+        """Apply only this strategy's signal and trade-management settings."""
+        for name, value in self.parameters.items():
+            setattr(algorithm, name, value)
+        for name, value in self.risk_parameters.items():
+            setattr(algorithm, name, value)
 
     def initialize(self, algorithm, key, symbol, consolidator):
         raise NotImplementedError
@@ -22,6 +31,28 @@ class EmaTrendStrategy(SignalStrategy):
     """The original EMA crossover with ADX and ATR-percentile filters."""
 
     name = "ema_trend"
+    parameters = {
+        "fast_period": 20,      # 快速EMA周期（基于5分钟K线）
+        "slow_period": 60,      # 慢速EMA周期（基于5分钟K线）
+        "atr_period": 14,       # ATR周期
+        "adx_period": 14,       # ADX周期
+        "adx_threshold": 20,    # 趋势强度阈值，低于此值视为盘整，不交易
+        "atr_lookback": 100,    # ATR历史分位数回溯窗口（5分钟bar数）
+        "atr_low_pct": 0.20,    # ATR低于历史20分位 -> 波动太小，不交易
+        "atr_high_pct": 0.90,   # ATR高于历史90分位 -> 波动过大/极端行情，不交易
+    }
+    risk_parameters = {
+        "total_risk_budget": 0.01,              # 组合总风险预算：账户权益的1%（两条腿合计）
+        "stop_loss_mode": "fixed_dollar",      # "fixed_dollar" 或 "atr"
+        "stop_loss_dollars_per_contract": 60.0, # 固定美元止损时，每张合约最大亏损
+        "atr_stop_mult": 2.0,                   # stop_loss_mode="atr" 时：止损距离 = N倍ATR
+        "atr_target_mult": 3.0,                 # 止盈距离 = N倍ATR
+        "max_trades_per_symbol_per_day": 4,     # 单品种每日最多开仓次数
+        "loss_cooldown_minutes": 30,            # 止损离场后，同一品种冷却多久才能再开仓
+        "daily_profit_target": 0.03,            # 单日盈利达到此比例后停止开新仓；设为None关闭
+        "trailing_activation_r": 1.0,           # 浮盈达到N倍初始止损距离后，启动移动止损
+        "trailing_atr_mult": 1.5,               # 移动止损跟踪距离 = N倍ATR
+    }
 
     def initialize(self, algorithm, key, symbol, consolidator):
         algorithm.ema_fast[key] = ExponentialMovingAverage(algorithm.fast_period)

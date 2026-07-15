@@ -43,9 +43,7 @@ class EmaTrendStrategy(SignalStrategy):
     }
     risk_parameters = {
         "total_risk_budget": 0.01,              # 组合总风险预算：账户权益的1%（两条腿合计）
-        "stop_loss_mode": "fixed_dollar",      # "fixed_dollar" 或 "atr"
-        "stop_loss_dollars_per_contract": 60.0, # 固定美元止损时，每张合约最大亏损
-        "atr_stop_mult": 2.0,                   # stop_loss_mode="atr" 时：止损距离 = N倍ATR
+        "atr_stop_mult": 2.0,                   # ATR 倍数止损距离 = N倍ATR
         "atr_target_mult": 3.0,                 # 止盈距离 = N倍ATR
         "max_trades_per_symbol_per_day": 4,     # 单品种每日最多开仓次数
         "loss_cooldown_minutes": 30,            # 止损离场后，同一品种冷却多久才能再开仓

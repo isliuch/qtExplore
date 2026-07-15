@@ -146,6 +146,11 @@ def _get_signal(self, key: str) -> int:
 
 # ------------------------------------------------------------------
 def _rebalance(self, signals):
+    if not isinstance(self.contracts_per_order, int) or isinstance(self.contracts_per_order, bool):
+        raise ValueError("contracts_per_order must be a positive integer")
+    if self.contracts_per_order < 1:
+        raise ValueError("contracts_per_order must be a positive integer")
+
     # v12: 全链路诊断日志
     # 用于定位策略"不下单"的具体环节：
     # signal -> position -> filter -> risk quantity -> margin -> order
@@ -216,6 +221,8 @@ def _rebalance(self, signals):
             continue
 
         # ---- 风险平价手数（第一层：按ATR止损风险预算）----
+        # Position size is fixed by contracts_per_order; retain this calculation
+        # for risk diagnostics only.
         equity = self.portfolio.total_portfolio_value
         risk_dollars_total = equity * self.total_risk_budget
         weight = inv_atr[key] / total_inv_atr if total_inv_atr > 0 else 0
@@ -230,7 +237,7 @@ def _rebalance(self, signals):
         if dollar_risk_per_contract is None:
             continue
 
-        quantity = int(risk_dollars_leg / dollar_risk_per_contract)
+        risk_quantity = int(risk_dollars_leg / dollar_risk_per_contract)
 
         if self.debug_level >= 2:
             self._debug_log(2,
@@ -239,7 +246,8 @@ def _rebalance(self, signals):
                 f"riskBudget={risk_dollars_leg:.2f} "
                 f"ATR={atr_val:.2f} "
                 f"contractRisk={dollar_risk_per_contract:.2f} "
-                f"rawQty={quantity}"
+                f"riskQty={risk_quantity} "
+                f"requestedQty={self.contracts_per_order}"
             )
 
         # ---- 第二层：保证金硬约束（v11修复）----
@@ -257,7 +265,7 @@ def _rebalance(self, signals):
         if max_affordable < 1:
             self._log_anomaly(f"margin_block_{key}",
                 f"[仓位阻断]{self.time.date()} {key} "
-                f"riskQty={quantity} "
+                f"riskQty={risk_quantity} "
                 f"marginNeed={est_margin_per_contract} "
                 f"remaining={self.portfolio.margin_remaining:.0f}"
             )
@@ -272,7 +280,7 @@ def _rebalance(self, signals):
             )
 
         quantity = min(
-            quantity,
+            self.contracts_per_order,
             max_affordable,
             self.max_contracts_per_symbol[key],
         )

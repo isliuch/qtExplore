@@ -310,23 +310,31 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                         f"{self._format_future_contract(old_holding)}", max_count=30)
             self.mapped_symbol[key] = new_mapped
 
-        # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓（止损止盈仍照常执行）
+        # 日内风控：当日亏损超限 / 达到盈利目标，停止开新仓。
+        # 日亏损熔断可选地立即平仓，避免已有仓位继续扩大当日亏损。
+        flatten_for_daily_loss = False
         if not self.trading_halted_today and self.daily_start_equity > 0:
             daily_pnl = self.portfolio.total_portfolio_value - self.daily_start_equity
             dd = daily_pnl / self.daily_start_equity
             if daily_pnl <= -self.daily_loss_limit_dollars:
                 self.trading_halted_today = True
+                flatten_for_daily_loss = self.flatten_on_daily_loss_halt
                 self._log_anomaly("daily_dollar_loss_halt",
                     f"[日亏损金额熔断] 日内损益=${daily_pnl:.2f} "
                     f"限额=-${self.daily_loss_limit_dollars:.2f}")
             elif dd <= -self.daily_loss_limit:
                 self.trading_halted_today = True
+                flatten_for_daily_loss = self.flatten_on_daily_loss_halt
                 self._log_anomaly("daily_loss_halt",
                     f"[日亏损熔断] 收益={dd:.2%}")
             elif self.daily_profit_target is not None and dd >= self.daily_profit_target:
                 self.trading_halted_today = True
                 self._log_anomaly("daily_profit_halt",
                     f"[日盈利锁定] 收益={dd:.2%}")
+
+        if flatten_for_daily_loss:
+            self.flatten_all()
+            return
 
         # 止损止盈检查，任何时段都执行，保护已有持仓
         for key in self.futures:

@@ -8,6 +8,8 @@ from copy import deepcopy
 COMMON_RISK_PARAMETERS = {
     "daily_loss_limit": 0.02,          # 单日最大亏损占权益比例，触发后当日停止开新仓
     "daily_loss_limit_dollars": 300.0, # 单日最大亏损金额，触发后当日停止开新仓
+    "flatten_on_daily_loss_halt": True, # 日亏损熔断时是否立即平掉已有仓位
+    "contracts_per_order": 1,          # 每次开仓的目标合约数量，仍受保证金与品种上限限制
     "margin_safety_buffer": 0.5,       # 只使用 margin_remaining 的该比例做新仓位，留缓冲
     "max_consecutive_losses": 3,       # 单日连续亏损达到此次数，当日停止开新仓
     "max_daily_orders": 300,           # 全策略单日订单数硬上限（安全阀，远低于QC限额）

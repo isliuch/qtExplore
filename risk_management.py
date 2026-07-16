@@ -111,9 +111,16 @@ def _submit_protective_orders(self, key: str) -> None:
     target = self.target_price[key]
     if stop is not None:
         if self.initial_stop_order_type == "stop_limit_order":
+            if (not isinstance(self.stop_limit_offset_ticks, int)
+                    or isinstance(self.stop_limit_offset_ticks, bool)
+                    or self.stop_limit_offset_ticks < 0):
+                raise ValueError("stop_limit_offset_ticks must be a non-negative integer")
+            tick_size = float(self.securities[symbol].symbol_properties.minimum_price_variation)
+            limit_offset = tick_size * self.stop_limit_offset_ticks
+            limit_price = stop - limit_offset if exit_quantity < 0 else stop + limit_offset
             _increment_order_count(self, "initial_stop")
             self.stop_order_ticket[key] = self.stop_limit_order(
-                symbol, exit_quantity, stop, stop, tag="Protective stop"
+                symbol, exit_quantity, stop, limit_price, tag="Protective stop"
             )
         elif self.initial_stop_order_type == "stop_market_order":
             _increment_order_count(self, "initial_stop")

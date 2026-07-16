@@ -22,6 +22,7 @@ def _reconcile_state(self):
             # 记账（比如强平/订单竞争），按实际情况纠正为空仓，避免永久卡死
             self._log_anomaly(f"reconcile_{key}",
                 f"[自愈]{self.time.date()} {key} 记账认为持仓,实际空仓,重置为空仓")
+            self._cancel_protective_orders(key)
             self._reset_position_state(key)
 
         elif self.position_side[key] == 0 and holding is not None and holding in self.portfolio and self.portfolio[holding].invested:
@@ -53,6 +54,7 @@ def _reconcile_state(self):
                     )
                 self.target_price[key] = None
                 self.trailing_active[key] = False
+                self._submit_protective_orders(key)
 
 # ------------------------------------------------------------------
 def _reset_position_state(self, key: str) -> None:
@@ -66,6 +68,75 @@ def _reset_position_state(self, key: str) -> None:
     self.initial_stop_dist[key] = None
     self.trailing_active[key] = False
     self.holding_symbol[key] = None
+    self.stop_order_ticket[key] = None
+    self.target_order_ticket[key] = None
+
+# ------------------------------------------------------------------
+def _cancel_protective_orders(self, key: str, exclude_order_id=None) -> None:
+    for tickets, label in (
+        (self.stop_order_ticket, "protective stop"),
+        (self.target_order_ticket, "protective target"),
+    ):
+        ticket = tickets.get(key)
+        if ticket is not None and ticket.order_id != exclude_order_id:
+            ticket.cancel(label)
+        tickets[key] = None
+
+# ------------------------------------------------------------------
+def _submit_protective_orders(self, key: str) -> None:
+    """Submit OCO-like stop-market and limit exits for an open position."""
+    symbol = self.holding_symbol[key]
+    if symbol is None or symbol not in self.portfolio:
+        return
+
+    quantity = self.portfolio[symbol].quantity
+    if quantity == 0:
+        return
+
+    exit_quantity = -quantity
+    stop = self.stop_price[key]
+    target = self.target_price[key]
+    if stop is not None:
+        if self.initial_stop_order_type == "stop_limit_order":
+            self.stop_order_ticket[key] = self.stop_limit_order(
+                symbol, exit_quantity, stop, stop, tag="Protective stop"
+            )
+        elif self.initial_stop_order_type == "stop_market_order":
+            self.stop_order_ticket[key] = self.stop_market_order(
+                symbol, exit_quantity, stop, tag="Protective stop"
+            )
+        else:
+            raise ValueError(
+                "initial_stop_order_type must be 'stop_limit_order' or "
+                f"'stop_market_order', got {self.initial_stop_order_type!r}"
+            )
+    if target is not None:
+        self.target_order_ticket[key] = self.limit_order(
+            symbol, exit_quantity, target, tag="Protective target"
+        )
+
+# ------------------------------------------------------------------
+def _submit_trailing_stop(self, key: str, trailing_amount: float) -> None:
+    """Replace the initial stop with a native trailing-stop order."""
+    symbol = self.holding_symbol[key]
+    if symbol is None or symbol not in self.portfolio or trailing_amount <= 0:
+        return
+
+    quantity = self.portfolio[symbol].quantity
+    if quantity == 0:
+        return
+
+    initial_stop_ticket = self.stop_order_ticket[key]
+    if initial_stop_ticket is not None:
+        initial_stop_ticket.cancel("Replacing initial stop with trailing stop")
+
+    self.stop_order_ticket[key] = self.trailing_stop_order(
+        symbol,
+        -quantity,
+        trailing_amount,
+        False,
+        tag="Protective trailing stop",
+    )
 
 # ------------------------------------------------------------------
 def _in_session(self):
@@ -194,6 +265,7 @@ def _rebalance(self, signals):
         if target_side != current_side and current_side != 0:
             holding = self.holding_symbol[key]
             if self._has_valid_price(holding):
+                self._cancel_protective_orders(key)
                 self.liquidate(holding)
             continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
@@ -334,11 +406,17 @@ def _check_stop_target(self, key: str) -> None:
     if (self.entry_price[key] is not None and self.initial_stop_dist[key]
             and self.initial_stop_dist[key] > 0):
         favorable_move = (price - self.entry_price[key]) * side
+        activated_trailing = False
         if not self.trailing_active[key] and favorable_move >= self.initial_stop_dist[key] * self.trailing_activation_r:
             self.trailing_active[key] = True
+            activated_trailing = True
             self.target_price[key] = None  # 启动移动止损后不再用固定止盈，让利润奔跑
+            target_ticket = self.target_order_ticket[key]
+            if target_ticket is not None:
+                target_ticket.cancel("Trailing stop activated")
+                self.target_order_ticket[key] = None
 
-        if self.trailing_active[key]:
+        if activated_trailing:
             atr_val = (self.atr_ind[key].current.value if self.atr_ind[key].is_ready
                        else self.initial_stop_dist[key] / self.atr_stop_mult)
             trail_dist = atr_val * self.trailing_atr_mult
@@ -352,31 +430,24 @@ def _check_stop_target(self, key: str) -> None:
                 fixed_trail_dist = fixed_dollars / self.multiplier[key]
                 trail_dist = min(trail_dist, fixed_trail_dist)
             if side == 1:
-                new_stop = price - trail_dist
-                if self.stop_price[key] is None or new_stop > self.stop_price[key]:
-                    self.stop_price[key] = new_stop
+                old_stop = self.stop_price[key]
+                new_stop = max(old_stop, price - trail_dist) if old_stop is not None else price - trail_dist
+                trailing_amount = price - new_stop
             else:
-                new_stop = price + trail_dist
-                if self.stop_price[key] is None or new_stop < self.stop_price[key]:
-                    self.stop_price[key] = new_stop
+                old_stop = self.stop_price[key]
+                new_stop = min(old_stop, price + trail_dist) if old_stop is not None else price + trail_dist
+                trailing_amount = new_stop - price
 
-    stop = self.stop_price[key]
-    target = self.target_price[key]
-
-    hit_stop = stop is not None and ((side == 1 and price <= stop) or (side == -1 and price >= stop))
-    hit_target = target is not None and ((side == 1 and price >= target) or (side == -1 and price <= target))
-
-    if hit_stop or hit_target:
-        self.liquidate(symbol)
-        if self.verbose_logging:
-            reason = "止损" if hit_stop else "止盈"
-            self.log(f"{key} 提交{reason}平仓 @ {price:.2f}")
+            if trailing_amount > 0:
+                self.stop_price[key] = new_stop
+                self._submit_trailing_stop(key, trailing_amount)
 
 # ------------------------------------------------------------------
 def flatten_all(self):
     for key, fut in self.futures.items():
         symbol = self.holding_symbol[key]
         if symbol is not None and self.portfolio[symbol].invested:
+            self._cancel_protective_orders(key)
             self.liquidate(symbol)
             if self.verbose_logging:
                 self.log(f"{key} 收盘前强制平仓")

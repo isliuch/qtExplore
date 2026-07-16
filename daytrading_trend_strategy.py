@@ -168,6 +168,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.position_side = {k: 0 for k in self.futures}   # 1多 / -1空 / 0空仓
         self.stop_price    = {k: None for k in self.futures}
         self.target_price  = {k: None for k in self.futures}
+        self.stop_order_ticket = {k: None for k in self.futures}
+        self.target_order_ticket = {k: None for k in self.futures}
 
         # 挂单期间的待定止损/止盈距离（点数），成交后用实际成交价换算成价位
         self.pending_stop_dist   = {k: None for k in self.futures}
@@ -304,6 +306,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
             if (self.position_side[key] != 0 and old_holding is not None
                     and new_mapped is not None and new_mapped != old_holding):
                 if self._has_valid_price(old_holding):
+                    self._cancel_protective_orders(key)
                     self.liquidate(old_holding)
                     self._log_anomaly(f"roll_{key}",
                         f"[展期]{self.time.date()} {key} 平掉旧合约 "
@@ -389,6 +392,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                 else:
                     self.consecutive_losses = 0
 
+            self._cancel_protective_orders(key, exclude_order_id=order_event.order_id)
             self._reset_position_state(key)
             return
 
@@ -412,6 +416,8 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         else:
             self.stop_price[key] = fill_price + stop_dist
             self.target_price[key] = fill_price - target_dist
+
+        self._submit_protective_orders(key)
 
         self.pending_side[key] = 0
         self.pending_stop_dist[key] = None
@@ -559,6 +565,9 @@ ATRTrendRiskParityMNQMES._reset_position_state = risk_management._reset_position
 ATRTrendRiskParityMNQMES._in_session = risk_management._in_session
 ATRTrendRiskParityMNQMES._has_valid_price = risk_management._has_valid_price
 ATRTrendRiskParityMNQMES._calculate_stop_loss = risk_management._calculate_stop_loss
+ATRTrendRiskParityMNQMES._cancel_protective_orders = risk_management._cancel_protective_orders
+ATRTrendRiskParityMNQMES._submit_protective_orders = risk_management._submit_protective_orders
+ATRTrendRiskParityMNQMES._submit_trailing_stop = risk_management._submit_trailing_stop
 ATRTrendRiskParityMNQMES._get_signal = risk_management._get_signal
 ATRTrendRiskParityMNQMES._rebalance = risk_management._rebalance
 ATRTrendRiskParityMNQMES._check_stop_target = risk_management._check_stop_target

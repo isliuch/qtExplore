@@ -23,6 +23,7 @@ def reset_daily_state(self):
     self.trades_today = {k: 0 for k in self.futures}
     self.consecutive_losses = 0
     self.daily_orders_count = 0
+    self.pending_cross_entry = {k: 0 for k in self.futures}
 
 # ------------------------------------------------------------------
 def _reconcile_state(self):
@@ -265,7 +266,12 @@ def _rebalance(self, signals):
     if self.debug_level >= 2:
         self.log(f"[REBALANCE开始] {self.time} signals={signals}")
 
-    active = {k: v for k, v in signals.items() if v != 0}
+    entry_candidates = {
+        key: (signals[key] or self.pending_cross_entry[key])
+        for key in self.futures
+        if self.position_side[key] == 0
+    }
+    active = {key: side for key, side in entry_candidates.items() if side != 0}
 
     inv_atr = {}
     for key in self.futures:
@@ -275,14 +281,17 @@ def _rebalance(self, signals):
     total_inv_atr = sum(inv_atr.get(k, 0) for k in active) if active else 0
 
     for key, fut in self.futures.items():
-        target_side = signals[key]
+        cross_side = signals[key]
         current_side = self.position_side[key]
+
+        if cross_side != 0:
+            self.pending_cross_entry[key] = cross_side
 
         if self.debug_level >= 2:
             mapped = self.mapped_symbol[key]
 
             self._debug_log(2,
-                f"[状态] {key} signal={target_side} "
+                f"[状态] {key} signal={cross_side} "
                 f"position={current_side} "
                 f"mapped={mapped} "
                 f"inSecurities={mapped in self.securities}"
@@ -290,7 +299,9 @@ def _rebalance(self, signals):
 
         # 信号翻转或归零 -> 平掉当前实际持有的合约（不是"当前近月合约"，
         # 展期过渡期这两者可能不是同一张合约）
-        if target_side != current_side and current_side != 0:
+        if current_side != 0:
+            if cross_side == 0 or cross_side == current_side:
+                continue
             holding = self.holding_symbol[key]
             if self._has_valid_price(holding):
                 self._cancel_protective_orders(key)
@@ -298,9 +309,10 @@ def _rebalance(self, signals):
                 self.liquidate(holding)
             continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
-        if target_side == 0 or current_side != 0:
+        target_side = self.pending_cross_entry[key]
+        if target_side == 0:
             if self.debug_level >= 2:
-                reason = "无信号" if target_side == 0 else "已有持仓"
+                reason = "没有新的EMA交叉"
                 self.log(f"[跳过]{key} reason={reason}")
             continue
 

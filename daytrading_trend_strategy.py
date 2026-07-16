@@ -183,6 +183,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.pending_stop_dist   = {k: None for k in self.futures}
         self.pending_target_dist = {k: None for k in self.futures}
         self.pending_side        = {k: 0 for k in self.futures}
+        self.pending_cross_entry = {k: 0 for k in self.futures}
 
         # ---- 风控状态 ----
         self.entry_price       = {k: None for k in self.futures}  # 当前持仓的实际成交入场价
@@ -431,6 +432,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.pending_side[key] = 0
         self.pending_stop_dist[key] = None
         self.pending_target_dist[key] = None
+        self.pending_cross_entry[key] = 0
 
     # ------------------------------------------------------------------
     def on_end_of_algorithm(self):

@@ -60,6 +60,9 @@ class EmaTrendStrategy(SignalStrategy):
         )
         algorithm.adx_ind[key] = AverageDirectionalIndex(algorithm.adx_period)
         algorithm.atr_window[key] = RollingWindow[float](algorithm.atr_lookback)
+        if not hasattr(algorithm, "ema_last_relation"):
+            algorithm.ema_last_relation = {}
+        algorithm.ema_last_relation[key] = 0
         algorithm.register_indicator(symbol, algorithm.ema_fast[key], consolidator)
         algorithm.register_indicator(symbol, algorithm.ema_slow[key], consolidator)
         algorithm.register_indicator(symbol, algorithm.atr_ind[key], consolidator)
@@ -73,6 +76,14 @@ class EmaTrendStrategy(SignalStrategy):
         if not (algorithm.ema_fast[key].is_ready and algorithm.ema_slow[key].is_ready
                 and algorithm.atr_ind[key].is_ready and algorithm.adx_ind[key].is_ready):
             return 0
+        fast = algorithm.ema_fast[key].current.value
+        slow = algorithm.ema_slow[key].current.value
+        relation = 1 if fast > slow else -1 if fast < slow else 0
+        previous_relation = algorithm.ema_last_relation[key]
+        crossed = relation != 0 and previous_relation != 0 and relation != previous_relation
+        if relation != 0:
+            algorithm.ema_last_relation[key] = relation
+
         if algorithm.atr_window[key].count < algorithm.atr_lookback:
             return 0
         atr_values = sorted(algorithm.atr_window[key])
@@ -82,9 +93,7 @@ class EmaTrendStrategy(SignalStrategy):
             return 0
         if algorithm.adx_ind[key].current.value < algorithm.adx_threshold:
             return 0
-        fast = algorithm.ema_fast[key].current.value
-        slow = algorithm.ema_slow[key].current.value
-        return 1 if fast > slow else -1 if fast < slow else 0
+        return relation if crossed else 0
 
 
 STRATEGIES = {EmaTrendStrategy.name: EmaTrendStrategy}

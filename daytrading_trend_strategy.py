@@ -150,6 +150,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
         # ------------------ 指标：挂在5分钟Consolidator上，减少信号噪音 ------------------
         self.ema_fast   = {}
+        self.ema_medium = {}
         self.ema_slow   = {}
         self.atr_ind    = {}
         self.adx_ind    = {}

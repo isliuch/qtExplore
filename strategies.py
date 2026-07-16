@@ -96,7 +96,72 @@ class EmaTrendStrategy(SignalStrategy):
         return relation if crossed else 0
 
 
-STRATEGIES = {EmaTrendStrategy.name: EmaTrendStrategy}
+class MinuteEmaTripleCrossStrategy(SignalStrategy):
+    """Enter only when 1-minute EMA5 crosses EMA10 and EMA20 together."""
+
+    name = "minute_ema_triple_cross"
+    parameters = {
+        "fast_period": 5,
+        "medium_period": 10,
+        "slow_period": 20,
+        "atr_period": 14,
+    }
+    risk_parameters = EmaTrendStrategy.risk_parameters.copy()
+
+    def initialize(self, algorithm, key, symbol, consolidator):
+        algorithm.ema_fast[key] = ExponentialMovingAverage(algorithm.fast_period)
+        algorithm.ema_medium[key] = ExponentialMovingAverage(algorithm.medium_period)
+        algorithm.ema_slow[key] = ExponentialMovingAverage(algorithm.slow_period)
+        algorithm.atr_ind[key] = AverageTrueRange(
+            algorithm.atr_period, MovingAverageType.WILDERS
+        )
+        algorithm.atr_window[key] = RollingWindow[float](1)
+        if not hasattr(algorithm, "minute_ema_relations"):
+            algorithm.minute_ema_relations = {}
+        algorithm.minute_ema_relations[key] = None
+
+        for indicator in (
+            algorithm.ema_fast[key],
+            algorithm.ema_medium[key],
+            algorithm.ema_slow[key],
+            algorithm.atr_ind[key],
+        ):
+            algorithm.register_indicator(symbol, indicator, Resolution.MINUTE)
+
+    def get_signal(self, algorithm, key):
+        if not (algorithm.ema_fast[key].is_ready
+                and algorithm.ema_medium[key].is_ready
+                and algorithm.ema_slow[key].is_ready):
+            return 0
+
+        fast = algorithm.ema_fast[key].current.value
+        medium = algorithm.ema_medium[key].current.value
+        slow = algorithm.ema_slow[key].current.value
+        relations = (
+            1 if fast > medium else -1 if fast < medium else 0,
+            1 if fast > slow else -1 if fast < slow else 0,
+        )
+        previous = algorithm.minute_ema_relations[key]
+        algorithm.minute_ema_relations[key] = relations
+
+        if previous is None or not algorithm.atr_ind[key].is_ready:
+            return 0
+
+        crossed_up = (
+            previous[0] <= 0 and relations[0] > 0
+            and previous[1] <= 0 and relations[1] > 0
+        )
+        crossed_down = (
+            previous[0] >= 0 and relations[0] < 0
+            and previous[1] >= 0 and relations[1] < 0
+        )
+        return 1 if crossed_up else -1 if crossed_down else 0
+
+
+STRATEGIES = {
+    EmaTrendStrategy.name: EmaTrendStrategy,
+    MinuteEmaTripleCrossStrategy.name: MinuteEmaTripleCrossStrategy,
+}
 
 
 def create_strategy(name):

@@ -466,18 +466,7 @@ def _check_stop_target(self, key: str) -> None:
     if (self.entry_price[key] is not None and self.initial_stop_dist[key]
             and self.initial_stop_dist[key] > 0):
         favorable_move = (price - self.entry_price[key]) * side
-        activated_trailing = False
         if not self.trailing_active[key] and favorable_move >= self.initial_stop_dist[key] * self.trailing_activation_r:
-            self.trailing_active[key] = True
-            activated_trailing = True
-            self.target_price[key] = None  # 启动移动止损后不再用固定止盈，让利润奔跑
-            target_ticket = self.target_order_ticket[key]
-            if target_ticket is not None:
-                _increment_order_count(self, "cancel")
-                target_ticket.cancel("Trailing stop activated")
-                self.target_order_ticket[key] = None
-
-        if activated_trailing:
             atr_val = (self.atr_ind[key].current.value if self.atr_ind[key].is_ready
                        else self.initial_stop_dist[key] / self.atr_stop_mult)
             trail_dist = atr_val * self.trailing_atr_mult
@@ -492,16 +481,23 @@ def _check_stop_target(self, key: str) -> None:
                 trail_dist = min(trail_dist, fixed_trail_dist)
             if side == 1:
                 old_stop = self.stop_price[key]
-                new_stop = max(old_stop, price - trail_dist) if old_stop is not None else price - trail_dist
-                trailing_amount = price - new_stop
+                new_stop = price - trail_dist
+                can_activate = old_stop is None or new_stop >= old_stop
             else:
                 old_stop = self.stop_price[key]
-                new_stop = min(old_stop, price + trail_dist) if old_stop is not None else price + trail_dist
-                trailing_amount = new_stop - price
+                new_stop = price + trail_dist
+                can_activate = old_stop is None or new_stop <= old_stop
 
-            if trailing_amount > 0:
+            if can_activate and trail_dist > 0:
+                self.trailing_active[key] = True
+                self.target_price[key] = None  # 启动移动止损后不再用固定止盈，让利润奔跑
+                target_ticket = self.target_order_ticket[key]
+                if target_ticket is not None:
+                    _increment_order_count(self, "cancel")
+                    target_ticket.cancel("Trailing stop activated")
+                    self.target_order_ticket[key] = None
                 self.stop_price[key] = new_stop
-                self._submit_trailing_stop(key, trailing_amount)
+                self._submit_trailing_stop(key, trail_dist)
 
 # ------------------------------------------------------------------
 def flatten_all(self):

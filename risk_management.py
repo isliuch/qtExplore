@@ -184,9 +184,10 @@ def _has_valid_price(self, symbol) -> bool:
 def _calculate_stop_loss(self, key: str, atr_value=None):
     """Return (stop_distance_points, dollar_risk_per_contract).
 
-    When ``fixed_dollar_stop_loss_enabled`` is enabled, compare the fixed-dollar
-    distance with the ATR-multiple distance and use the narrower valid stop.
-    When it is disabled, use the ATR-multiple stop only.
+    ``stop_loss_type`` selects the fixed-dollar/ATR combination: ``narrower``
+    uses the smaller distance, ``wider`` uses the larger distance, and ``fixed``
+    uses the fixed-dollar distance only. When fixed-dollar stops are disabled,
+    the ATR-multiple stop remains the fallback for the combination modes.
     ``None`` is returned for both values when the selected calculation cannot
     produce a valid positive stop distance.
     """
@@ -201,14 +202,30 @@ def _calculate_stop_loss(self, key: str, atr_value=None):
         if multiplier > 0 else None
     )
 
-    if self.fixed_dollar_stop_loss_enabled:
+    if self.stop_loss_type not in ("narrower", "wider", "fixed"):
+        raise ValueError(
+            "stop_loss_type must be 'narrower', 'wider', or 'fixed', "
+            f"got {self.stop_loss_type!r}"
+        )
+
+    if self.stop_loss_type == "fixed":
+        if not self.fixed_dollar_stop_loss_enabled:
+            raise ValueError(
+                "fixed_dollar_stop_loss_enabled must be True when "
+                "stop_loss_type is 'fixed'"
+            )
+        stop_distance = fixed_stop_distance
+    elif not self.fixed_dollar_stop_loss_enabled:
+        stop_distance = atr_stop_distance
+    else:
         valid_distances = [
             distance for distance in (fixed_stop_distance, atr_stop_distance)
             if distance is not None and distance > 0
         ]
-        stop_distance = min(valid_distances) if valid_distances else None
-    else:
-        stop_distance = atr_stop_distance
+        if self.stop_loss_type == "narrower":
+            stop_distance = min(valid_distances) if valid_distances else None
+        else:
+            stop_distance = max(valid_distances) if valid_distances else None
 
     dollar_risk = stop_distance * multiplier if stop_distance else None
 
@@ -465,10 +482,10 @@ def _check_stop_target(self, key: str) -> None:
                        else self.initial_stop_dist[key] / self.atr_stop_mult)
             trail_dist = atr_val * self.trailing_atr_mult
             if self.fixed_dollar_trailing_enabled:
-                fixed_dollars = self.fixed_dollar_trailing_dollars_per_contract
+                fixed_dollars = self.trailing_stop_dollars_per_contract
                 if fixed_dollars <= 0:
                     raise ValueError(
-                        "fixed_dollar_trailing_dollars_per_contract must be positive "
+                        "trailing_stop_dollars_per_contract must be positive "
                         "when fixed_dollar_trailing_enabled is True"
                     )
                 fixed_trail_dist = fixed_dollars / self.multiplier[key]

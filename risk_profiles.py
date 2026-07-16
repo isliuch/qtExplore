@@ -12,10 +12,11 @@ COMMON_RISK_PARAMETERS = {
     "contracts_per_order": 1,  # Target contracts for each entry order.
     "fixed_dollar_stop_loss_enabled": True,  # Use a fixed-dollar initial stop.
     "stop_loss_dollars_per_contract": 100.0,  # Fixed-dollar loss per contract.
+    "stop_loss_type": "fixed",  # narrower, wider, or fixed.
     "initial_stop_order_type": "stop_limit_order",  # stop_limit_order or stop_market_order.
     "stop_limit_offset_ticks": 10,  # Limit-price buffer beyond the stop trigger.
     "fixed_dollar_trailing_enabled": True,  # Use a fixed-dollar trailing distance.
-    "fixed_dollar_trailing_dollars_per_contract": 100.0,  # Dollar trail per contract.
+    "trailing_stop_dollars_per_contract": 100.0,  # Dollar trail per contract.
     "margin_safety_buffer": 0.5,  # Fraction of remaining margin usable for entries.
     "max_consecutive_losses": 3,  # Daily consecutive-loss limit.
     "max_daily_orders": 300,  # Daily filled-order safety limit.

@@ -167,7 +167,10 @@ def _submit_trailing_stop(self, key: str, trailing_amount: float) -> None:
 def _in_session(self):
     t = self.time
     minutes = t.hour * 60 + t.minute
-    return self.session_start_minutes <= minutes <= self.session_end_minutes
+    # The end time is reserved for the scheduled flatten_all call.  Keeping it
+    # exclusive prevents an on_data callback at the same timestamp from
+    # reopening a position immediately after the end-of-day liquidation.
+    return self.session_start_minutes <= minutes < self.session_end_minutes
 
 # ------------------------------------------------------------------
 def _has_valid_price(self, symbol) -> bool:

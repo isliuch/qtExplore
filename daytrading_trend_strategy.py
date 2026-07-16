@@ -102,6 +102,14 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
         self.debug_level = 1
         self.diagnostic_logging = self.debug_level > 0
         self.trade_count = 0
+        self.order_submission_counts = {
+            "entry": 0,
+            "initial_stop": 0,
+            "target": 0,
+            "trailing": 0,
+            "liquidate": 0,
+            "cancel": 0,
+        }
 
         # 异常/关键事件日志：不受debug_level限制，出问题时始终会打印，
         # 但每个日志来源(site)单独计数，达到各自上限后自动停止，避免某一处
@@ -307,6 +315,7 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
                     and new_mapped is not None and new_mapped != old_holding):
                 if self._has_valid_price(old_holding):
                     self._cancel_protective_orders(key)
+                    risk_management._increment_order_count(self, "liquidate")
                     self.liquidate(old_holding)
                     self._log_anomaly(f"roll_{key}",
                         f"[展期]{self.time.date()} {key} 平掉旧合约 "
@@ -425,6 +434,12 @@ class ATRTrendRiskParityMNQMES(QCAlgorithm):
 
     # ------------------------------------------------------------------
     def on_end_of_algorithm(self):
+        counts = getattr(self, "order_submission_counts", {})
+        order_counts = ", ".join(
+            f"{category}={counts.get(category, 0)}"
+            for category in risk_management.ORDER_COUNT_CATEGORIES
+        )
+        self.log(f"[Order Counts] {order_counts}")
         # 只在回测结束时打一条汇总日志，不管verbose_logging开关都保留，
         # 这样即使全程静默也能知道策略到底交易了多少次
         self.log(f"回测结束，总成交笔数={self.trade_count}，最终权益={self.portfolio.total_portfolio_value:.2f}")

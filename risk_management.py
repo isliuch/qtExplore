@@ -3,6 +3,19 @@ from AlgorithmImports import *
 # endregion
 
 
+ORDER_COUNT_CATEGORIES = (
+    "entry", "initial_stop", "target", "trailing", "liquidate", "cancel"
+)
+
+
+def _increment_order_count(algorithm, category: str) -> None:
+    counts = getattr(algorithm, "order_submission_counts", None)
+    if counts is None:
+        counts = {name: 0 for name in ORDER_COUNT_CATEGORIES}
+        algorithm.order_submission_counts = counts
+    counts[category] = counts.get(category, 0) + 1
+
+
 # ------------------------------------------------------------------
 def reset_daily_state(self):
     self.daily_start_equity = self.portfolio.total_portfolio_value
@@ -71,7 +84,6 @@ def _reset_position_state(self, key: str) -> None:
     self.stop_order_ticket[key] = None
     self.target_order_ticket[key] = None
 
-# ------------------------------------------------------------------
 def _cancel_protective_orders(self, key: str, exclude_order_id=None) -> None:
     for tickets, label in (
         (self.stop_order_ticket, "protective stop"),
@@ -79,6 +91,7 @@ def _cancel_protective_orders(self, key: str, exclude_order_id=None) -> None:
     ):
         ticket = tickets.get(key)
         if ticket is not None and ticket.order_id != exclude_order_id:
+            _increment_order_count(self, "cancel")
             ticket.cancel(label)
         tickets[key] = None
 
@@ -98,10 +111,12 @@ def _submit_protective_orders(self, key: str) -> None:
     target = self.target_price[key]
     if stop is not None:
         if self.initial_stop_order_type == "stop_limit_order":
+            _increment_order_count(self, "initial_stop")
             self.stop_order_ticket[key] = self.stop_limit_order(
                 symbol, exit_quantity, stop, stop, tag="Protective stop"
             )
         elif self.initial_stop_order_type == "stop_market_order":
+            _increment_order_count(self, "initial_stop")
             self.stop_order_ticket[key] = self.stop_market_order(
                 symbol, exit_quantity, stop, tag="Protective stop"
             )
@@ -111,6 +126,7 @@ def _submit_protective_orders(self, key: str) -> None:
                 f"'stop_market_order', got {self.initial_stop_order_type!r}"
             )
     if target is not None:
+        _increment_order_count(self, "target")
         self.target_order_ticket[key] = self.limit_order(
             symbol, exit_quantity, target, tag="Protective target"
         )
@@ -128,8 +144,10 @@ def _submit_trailing_stop(self, key: str, trailing_amount: float) -> None:
 
     initial_stop_ticket = self.stop_order_ticket[key]
     if initial_stop_ticket is not None:
+        _increment_order_count(self, "cancel")
         initial_stop_ticket.cancel("Replacing initial stop with trailing stop")
 
+    _increment_order_count(self, "trailing")
     self.stop_order_ticket[key] = self.trailing_stop_order(
         symbol,
         -quantity,
@@ -266,6 +284,7 @@ def _rebalance(self, signals):
             holding = self.holding_symbol[key]
             if self._has_valid_price(holding):
                 self._cancel_protective_orders(key)
+                _increment_order_count(self, "liquidate")
                 self.liquidate(holding)
             continue  # 平仓单发出后，等下一根bar再评估是否开新仓，避免同一tick平开混在一起
 
@@ -382,8 +401,10 @@ def _rebalance(self, signals):
             )
 
         if target_side == 1:
+            _increment_order_count(self, "entry")
             self.market_order(symbol, quantity)
         else:
+            _increment_order_count(self, "entry")
             self.market_order(symbol, -quantity)
 
         if self.verbose_logging:
@@ -413,6 +434,7 @@ def _check_stop_target(self, key: str) -> None:
             self.target_price[key] = None  # 启动移动止损后不再用固定止盈，让利润奔跑
             target_ticket = self.target_order_ticket[key]
             if target_ticket is not None:
+                _increment_order_count(self, "cancel")
                 target_ticket.cancel("Trailing stop activated")
                 self.target_order_ticket[key] = None
 
@@ -448,6 +470,7 @@ def flatten_all(self):
         symbol = self.holding_symbol[key]
         if symbol is not None and self.portfolio[symbol].invested:
             self._cancel_protective_orders(key)
+            _increment_order_count(self, "liquidate")
             self.liquidate(symbol)
             if self.verbose_logging:
                 self.log(f"{key} 收盘前强制平仓")
